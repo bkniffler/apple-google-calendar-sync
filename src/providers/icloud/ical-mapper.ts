@@ -23,7 +23,7 @@ export function icalObjectToCanonical(
     return [];
   }
 
-  const root = ICAL.Component.fromString(object.data);
+  const root = parseCalendarObject(object.data);
   const events = root.getAllSubcomponents("vevent");
 
   return events.map((component) => componentToCanonical(calendarId, component, object));
@@ -43,7 +43,11 @@ export function canonicalToICal(event: CanonicalEvent): string {
   setOptionalText(component, "description", event.description);
   setOptionalText(component, "location", event.location);
   component.updatePropertyWithValue("status", event.status.toUpperCase());
-  component.updatePropertyWithValue("class", event.visibility.toUpperCase());
+  if (event.visibility === "default" || event.visibility === "public") {
+    component.removeAllProperties("class");
+  } else {
+    component.updatePropertyWithValue("class", event.visibility.toUpperCase());
+  }
   setTimeProperty(component, "dtstart", event.start);
   setTimeProperty(component, "dtend", event.end);
 
@@ -198,18 +202,24 @@ function setTimeProperty(
   const property = new ICAL.Property(propertyName);
 
   if (value.kind === "date") {
-    property.resetType("date");
-    property.setValue(ICAL.Time.fromDateString(value.value));
-  } else {
-    property.resetType("date-time");
-    if (value.timezone && value.timezone !== "UTC") {
-      property.setParameter("tzid", value.timezone);
-    }
-    property.setValue(ICAL.Time.fromJSDate(new Date(value.value), true));
+    component.removeAllProperties(propertyName);
+    component.addProperty(ICAL.Property.fromString(`${propertyName.toUpperCase()};VALUE=DATE:${compactDate(value.value)}`));
+    return;
   }
 
-  component.removeAllProperties(propertyName);
-  component.addProperty(property);
+  if (value.timezone && value.timezone !== "UTC") {
+    component.removeAllProperties(propertyName);
+    component.addProperty(
+      ICAL.Property.fromString(
+        `${propertyName.toUpperCase()};TZID=${value.timezone}:${compactLocalDateTime(value.value)}`
+      )
+    );
+  } else {
+    property.resetType("date-time");
+    property.setValue(ICAL.Time.fromJSDate(new Date(value.value), true));
+    component.removeAllProperties(propertyName);
+    component.addProperty(property);
+  }
 }
 
 function recurrenceValue(component: InstanceType<typeof ICAL.Component>): CanonicalEvent["recurrence"] {
@@ -315,4 +325,99 @@ function formatDate(time: InstanceType<typeof ICAL.Time>): string {
   return `${time.year.toString().padStart(4, "0")}-${time.month
     .toString()
     .padStart(2, "0")}-${time.day.toString().padStart(2, "0")}`;
+}
+
+function parseCalendarObject(data: string): InstanceType<typeof ICAL.Component> {
+  try {
+    return ICAL.Component.fromString(data);
+  } catch (error) {
+    return ICAL.Component.fromString(repairLiteralNewlinesInTextProperties(data));
+  }
+}
+
+function repairLiteralNewlinesInTextProperties(data: string): string {
+  const unfoldedLines = unfoldCalendarLines(data);
+  const repaired: string[] = [];
+  let skippingMalformedStructuredLocation = false;
+
+  for (const line of unfoldedLines) {
+    if (line.toUpperCase().startsWith("X-APPLE-STRUCTURED-LOCATION")) {
+      skippingMalformedStructuredLocation = true;
+      continue;
+    }
+
+    if (skippingMalformedStructuredLocation) {
+      if (!isContentLine(line)) {
+        continue;
+      }
+      skippingMalformedStructuredLocation = false;
+    }
+
+    if (isContentLine(line) || repaired.length === 0) {
+      repaired.push(line);
+      continue;
+    }
+
+    const previousIndex = repaired.length - 1;
+    const previous = repaired[previousIndex];
+    if (previous && isRepairableTextProperty(previous)) {
+      repaired[previousIndex] = `${previous}\\n${escapeTextValue(line)}`;
+      continue;
+    }
+
+    repaired.push(line);
+  }
+
+  return repaired.join("\r\n");
+}
+
+function unfoldCalendarLines(data: string): string[] {
+  const lines = data.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  const unfolded: string[] = [];
+
+  for (const line of lines) {
+    if ((line.startsWith(" ") || line.startsWith("\t")) && unfolded.length > 0) {
+      unfolded[unfolded.length - 1] = `${unfolded[unfolded.length - 1]}${line.slice(1)}`;
+    } else {
+      unfolded.push(line);
+    }
+  }
+
+  return unfolded.filter((line, index, list) => line !== "" || index === list.length - 1);
+}
+
+function isContentLine(line: string): boolean {
+  return /^[A-Z0-9-]+(?:[;:].*)?$/i.test(line) && /[;:]/.test(line);
+}
+
+function isRepairableTextProperty(line: string): boolean {
+  return /^(SUMMARY|DESCRIPTION|LOCATION|COMMENT|CONTACT)(?:[;:]|$)/i.test(line);
+}
+
+function escapeTextValue(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/,/g, "\\,").replace(/;/g, "\\;");
+}
+
+function compactDate(value: string): string {
+  return value.replaceAll("-", "");
+}
+
+function compactLocalDateTime(value: string): string {
+  const match = value.match(
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/
+  );
+  if (!match) {
+    return compactUtcDateTime(value);
+  }
+
+  const [, year, month, day, hour, minute, second = "00"] = match;
+  return `${year}${month}${day}T${hour}${minute}${second}`;
+}
+
+function compactUtcDateTime(value: string): string {
+  const date = new Date(value);
+  return date
+    .toISOString()
+    .replace(/[-:]/g, "")
+    .replace(/\.\d{3}Z$/, "Z");
 }

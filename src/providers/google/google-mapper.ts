@@ -63,12 +63,14 @@ export function canonicalToGoogle(
     start: canonicalDateToGoogle(event.start),
     end: canonicalDateToGoogle(event.end),
     recurrence: googleRecurrenceLines(event),
-    attendees: event.attendees.map((attendee) => ({
-      email: attendee.email,
-      displayName: attendee.name,
-      optional: attendee.optional,
-      responseStatus: attendee.responseStatus
-    })),
+    attendees: event.attendees
+      .filter((attendee) => isEmailLike(attendee.email))
+      .map((attendee) => ({
+        email: attendee.email,
+        displayName: attendee.name,
+        optional: attendee.optional,
+        responseStatus: attendee.responseStatus
+      })),
     reminders: {
       useDefault: event.reminders.length === 0,
       overrides:
@@ -133,7 +135,7 @@ function canonicalDateToGoogle(value: EventDateTime): GoogleEventDateTime {
 
   return {
     dateTime: value.value,
-    timeZone: value.timezone
+    timeZone: isGoogleTimeZone(value.timezone) ? value.timezone : undefined
   };
 }
 
@@ -165,8 +167,45 @@ function googleRecurrenceLines(event: CanonicalEvent): string[] | undefined {
   }
 
   for (const exdate of event.recurrence?.exdates ?? []) {
-    lines.push(`EXDATE:${exdate}`);
+    const line = googleExdateLine(event, exdate);
+    if (line) {
+      lines.push(line);
+    }
   }
 
   return lines.length > 0 ? lines : undefined;
+}
+
+function isEmailLike(value: string): boolean {
+  return /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(value);
+}
+
+function isGoogleTimeZone(value: string | undefined): value is string {
+  return value === "UTC" || Boolean(value?.includes("/"));
+}
+
+function googleExdateLine(event: CanonicalEvent, value: string): string | undefined {
+  if (/^\d{8}$/.test(value)) {
+    return `EXDATE;VALUE=DATE:${value}`;
+  }
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return `EXDATE;VALUE=DATE:${value.replaceAll("-", "")}`;
+  }
+
+  const localDateTime = value.match(
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/
+  );
+  if (localDateTime) {
+    const compact = `${localDateTime[1]}${localDateTime[2]}${localDateTime[3]}T${localDateTime[4]}${localDateTime[5]}${localDateTime[6] ?? "00"}`;
+    const timezone = event.start.kind === "dateTime" ? event.start.timezone : undefined;
+    return isGoogleTimeZone(timezone) ? `EXDATE;TZID=${timezone}:${compact}` : `EXDATE:${compact}`;
+  }
+
+  const parsed = new Date(value);
+  if (Number.isFinite(parsed.getTime())) {
+    return `EXDATE:${parsed.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z")}`;
+  }
+
+  return undefined;
 }

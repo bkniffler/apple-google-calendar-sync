@@ -23,6 +23,23 @@ export class ProviderHttpError extends Error {
   }
 }
 
+export class ProviderUidCollisionError extends Error {
+  constructor(
+    readonly provider: string,
+    readonly canonicalUid: string,
+    readonly targetCalendarId: string,
+    readonly existingCalendarId: string,
+    readonly existingCalendarName?: string | undefined
+  ) {
+    super(
+      `${provider} UID collision for ${canonicalUid}: already exists in ${
+        existingCalendarName ?? existingCalendarId
+      }`
+    );
+    this.name = "ProviderUidCollisionError";
+  }
+}
+
 export class ProviderSyncTokenExpiredError extends Error {
   constructor(provider: string) {
     super(`${provider} sync token expired`);

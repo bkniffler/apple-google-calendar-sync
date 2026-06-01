@@ -51,6 +51,13 @@ bun run sync
 bun run sync:watch
 ```
 
+Dry runs write a CSV report to `.insync/reports/` by default. You can choose
+the path explicitly:
+
+```bash
+bun src/index.ts sync --once --report .insync/reports/review.csv
+```
+
 `sync` runs as a dry-run by default. To write changes, set `dryRun: false`
 in `insync.config.ts`, then run:
 

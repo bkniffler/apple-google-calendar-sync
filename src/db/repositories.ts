@@ -298,6 +298,25 @@ export function recordConflict(
   );
 }
 
+export function loadUnresolvedConflictUids(
+  db: AppDatabase,
+  syncPairId: string,
+  reason: string
+): Set<string> {
+  const rows = db
+    .query<{ canonical_uid: string | null }, [string, string]>(
+      `SELECT DISTINCT canonical_uid
+      FROM sync_conflicts
+      WHERE sync_pair_id = ?
+        AND reason = ?
+        AND resolved_at IS NULL
+        AND canonical_uid IS NOT NULL`
+    )
+    .all(syncPairId, reason);
+
+  return new Set(rows.flatMap((row) => (row.canonical_uid ? [row.canonical_uid] : [])));
+}
+
 export function accountCredentialEnv(provider: ProviderName): string[] {
   return provider === "google"
     ? ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN"]

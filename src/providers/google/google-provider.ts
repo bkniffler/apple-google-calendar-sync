@@ -168,7 +168,6 @@ export class GoogleCalendarProvider implements CalendarProvider {
     query: Record<string, string | undefined> = {},
     init: RequestInit = {}
   ): Promise<T> {
-    const accessToken = await this.getAccessToken();
     const url = new URL(`https://www.googleapis.com/calendar/v3${path}`);
     for (const [key, value] of Object.entries(query)) {
       if (value !== undefined) {
@@ -176,28 +175,37 @@ export class GoogleCalendarProvider implements CalendarProvider {
       }
     }
 
-    const headers = new Headers(init.headers);
-    headers.set("Authorization", `Bearer ${accessToken}`);
-    if (init.body && !headers.has("Content-Type")) {
-      headers.set("Content-Type", "application/json");
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const accessToken = await this.getAccessToken();
+      const headers = new Headers(init.headers);
+      headers.set("Authorization", `Bearer ${accessToken}`);
+      if (init.body && !headers.has("Content-Type")) {
+        headers.set("Content-Type", "application/json");
+      }
+
+      const response = await fetch(url, { ...init, headers });
+      const body = await response.text();
+
+      if (response.status === 410) {
+        throw new ProviderSyncTokenExpiredError(this.name);
+      }
+
+      if (!response.ok) {
+        if (isRateLimitResponse(response.status, body) && attempt < 5) {
+          await sleep(rateLimitDelayMs(attempt));
+          continue;
+        }
+        throw new ProviderHttpError(this.name, response.status, body);
+      }
+
+      if (!body) {
+        return undefined as T;
+      }
+
+      return JSON.parse(body) as T;
     }
 
-    const response = await fetch(url, { ...init, headers });
-    const body = await response.text();
-
-    if (response.status === 410) {
-      throw new ProviderSyncTokenExpiredError(this.name);
-    }
-
-    if (!response.ok) {
-      throw new ProviderHttpError(this.name, response.status, body);
-    }
-
-    if (!body) {
-      return undefined as T;
-    }
-
-    return JSON.parse(body) as T;
+    throw new ProviderHttpError(this.name, 429, "rate limit retries exhausted");
   }
 
   private async getAccessToken(): Promise<string> {
@@ -232,4 +240,20 @@ export class GoogleCalendarProvider implements CalendarProvider {
     this.accessTokenExpiresAt = Date.now() + (token.expires_in ?? 3600) * 1000;
     return this.accessToken;
   }
+}
+
+function isRateLimitResponse(status: number, body: string): boolean {
+  return (
+    status === 429 ||
+    (status === 403 &&
+      (body.includes("rateLimitExceeded") || body.includes("userRateLimitExceeded")))
+  );
+}
+
+function rateLimitDelayMs(attempt: number): number {
+  return 1_000 * 2 ** attempt + Math.floor(Math.random() * 500);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

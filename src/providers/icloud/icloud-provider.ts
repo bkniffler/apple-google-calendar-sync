@@ -1,5 +1,9 @@
 import { createDAVClient, type DAVCalendar, type DAVCalendarObject } from "tsdav";
-import { ProviderHttpError, ProviderNotConfiguredError } from "../errors";
+import {
+  ProviderHttpError,
+  ProviderNotConfiguredError,
+  ProviderUidCollisionError
+} from "../errors";
 import type {
   CalendarProvider,
   CanonicalEvent,
@@ -76,14 +80,32 @@ export class ICloudCalDavProvider implements CalendarProvider {
     const client = await this.getClient();
     const calendar = await this.findCalendar(calendarId);
     const filename = eventFilename(event);
+    const href = new URL(filename, ensureTrailingSlash(calendar.url)).toString();
     const response = await client.createCalendarObject({
       calendar,
       filename,
       iCalString: canonicalToICal(event)
     });
+    if (response.status === 412) {
+      const existing =
+        (await this.findExistingEventAtHref(calendarId, href, event.canonicalUid)) ??
+        (await this.findExistingEventByUid(calendarId, event.canonicalUid));
+      if (existing) {
+        return existing;
+      }
+      const collision = await this.findExistingEventInAnyCalendar(calendarId, event.canonicalUid);
+      if (collision) {
+        throw new ProviderUidCollisionError(
+          this.name,
+          event.canonicalUid,
+          calendarId,
+          collision.calendarId,
+          collision.calendarName
+        );
+      }
+    }
     await assertDavOk(this.name, response);
 
-    const href = new URL(filename, ensureTrailingSlash(calendar.url)).toString();
     return icalMetaFromObject(calendarId, href, response.headers.get("etag") ?? undefined);
   }
 
@@ -175,6 +197,113 @@ export class ICloudCalDavProvider implements CalendarProvider {
     }
 
     return calendar;
+  }
+
+  private async findExistingEventByUid(
+    calendarId: string,
+    canonicalUid: string
+  ): Promise<ProviderEventMeta | undefined> {
+    const client = await this.getClient();
+    const calendar = await this.findCalendar(calendarId);
+    const objects = (await client.fetchCalendarObjects({
+      calendar,
+      useMultiGet: true
+    })) as DAVCalendarObject[];
+
+    for (const object of objects) {
+      const events = icalObjectToCanonical(calendarId, {
+        url: object.url,
+        ...(object.etag ? { etag: object.etag } : {}),
+        ...(typeof object.data === "string" ? { data: object.data } : {})
+      });
+      const existing = events.find(
+        (event) => event.canonicalUid === canonicalUid && !event.providerMeta.deleted
+      );
+      if (existing) {
+        return existing.providerMeta;
+      }
+    }
+
+    return undefined;
+  }
+
+  private async findExistingEventAtHref(
+    calendarId: string,
+    href: string,
+    canonicalUid: string
+  ): Promise<ProviderEventMeta | undefined> {
+    const client = await this.getClient();
+    const calendar = await this.findCalendar(calendarId);
+
+    try {
+      const objects = (await client.fetchCalendarObjects({
+        calendar,
+        objectUrls: [href],
+        useMultiGet: true
+      })) as DAVCalendarObject[];
+
+      for (const object of objects) {
+        const events = icalObjectToCanonical(calendarId, {
+          url: object.url,
+          ...(object.etag ? { etag: object.etag } : {}),
+          ...(typeof object.data === "string" ? { data: object.data } : {})
+        });
+        const existing = events.find(
+          (event) => event.canonicalUid === canonicalUid && !event.providerMeta.deleted
+        );
+        if (existing) {
+          return existing.providerMeta;
+        }
+      }
+    } catch {
+      return undefined;
+    }
+
+    return undefined;
+  }
+
+  private async findExistingEventInAnyCalendar(
+    targetCalendarId: string,
+    canonicalUid: string
+  ): Promise<
+    | {
+        calendarId: string;
+        calendarName?: string | undefined;
+      }
+    | undefined
+  > {
+    const client = await this.getClient();
+    const calendars = await this.fetchCalendars();
+
+    for (const calendar of calendars) {
+      if (calendar.url === targetCalendarId) {
+        continue;
+      }
+
+      const objects = (await client.fetchCalendarObjects({
+        calendar,
+        useMultiGet: true
+      })) as DAVCalendarObject[];
+
+      for (const object of objects) {
+        const events = icalObjectToCanonical(calendar.url, {
+          url: object.url,
+          ...(object.etag ? { etag: object.etag } : {}),
+          ...(typeof object.data === "string" ? { data: object.data } : {})
+        });
+        const existing = events.find(
+          (event) => event.canonicalUid === canonicalUid && !event.providerMeta.deleted
+        );
+        if (existing) {
+          return {
+            calendarId: calendar.url,
+            calendarName: displayName(calendar)
+          };
+        }
+      }
+    }
+
+    return undefined;
   }
 }
 

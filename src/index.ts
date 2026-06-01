@@ -85,6 +85,8 @@ async function sync(args: string[]): Promise<void> {
   const once = args.includes("--once") || !watch;
   const apply = args.includes("--apply");
   const config = await loadServiceConfig(env.INSYNC_CONFIG);
+  const dryRun = !apply || config.dryRun;
+  const reportPath = readFlagValue(args, "--report") ?? (dryRun ? defaultReportPath() : undefined);
   const db = openDatabase(env.INSYNC_DB_PATH);
   migrate(db);
 
@@ -92,7 +94,8 @@ async function sync(args: string[]): Promise<void> {
     db,
     config,
     logger,
-    dryRun: !apply || config.dryRun,
+    dryRun,
+    reportPath,
     google: new GoogleCalendarProvider({
       clientId: env.GOOGLE_CLIENT_ID,
       clientSecret: env.GOOGLE_CLIENT_SECRET,
@@ -105,8 +108,11 @@ async function sync(args: string[]): Promise<void> {
     })
   });
 
-  if (!apply || config.dryRun) {
-    logger.warn("sync is running in dry-run mode; pass --apply and set dryRun=false in config to write");
+  if (dryRun) {
+    logger.warn(
+      { reportPath },
+      "sync is running in dry-run mode; pass --apply and set dryRun=false in config to write"
+    );
   }
 
   if (once) {
@@ -150,8 +156,24 @@ function printUsage(): void {
   bun src/index.ts doctor
   bun src/index.ts migrate
   bun src/index.ts sync --once
+  bun src/index.ts sync --once --report .insync/reports/report.csv
   bun src/index.ts sync --once --apply
   bun src/index.ts sync --watch --apply`);
+}
+
+function readFlagValue(args: string[], flag: string): string | undefined {
+  const exactIndex = args.indexOf(flag);
+  if (exactIndex >= 0) {
+    return args[exactIndex + 1];
+  }
+
+  const prefix = `${flag}=`;
+  return args.find((arg) => arg.startsWith(prefix))?.slice(prefix.length);
+}
+
+function defaultReportPath(): string {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return `.insync/reports/dry-run-${stamp}.csv`;
 }
 
 async function auth(args: string[]): Promise<void> {
