@@ -143,7 +143,7 @@ future interchangeable taskbar/menu-bar interface.
 - [x] Port conflict CSV export.
 - [x] Port duplicate unresolved conflict cleanup.
 - [x] Port stale conflict cleanup.
-- [ ] Add conflict inspection helpers for the TUI.
+- [x] Add conflict inspection helpers for the TUI.
 - [ ] Add future manual-resolution commands once we know the desired workflow.
 
 ## 10. Setup Flow

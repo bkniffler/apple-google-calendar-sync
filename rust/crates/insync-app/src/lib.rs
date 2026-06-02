@@ -10,6 +10,7 @@ pub struct AppModel {
     pub selected_command_index: usize,
     pub selected_pair_id: Option<String>,
     pub selected_run_id: Option<String>,
+    pub selected_conflict_index: Option<usize>,
     pub run_filter: AppRunFilter,
     pub conflict_count: usize,
     pub last_message: Option<String>,
@@ -19,6 +20,8 @@ pub struct AppModel {
     pub recent_error: Option<String>,
     pub pairs: Vec<AppPair>,
     pub runs: Vec<AppRun>,
+    pub conflict_summaries: Vec<AppConflictSummary>,
+    pub conflict_details: Vec<AppConflictDetail>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,6 +48,8 @@ pub struct AppRuntimeSnapshot {
     pub recent_error: Option<String>,
     pub pairs: Vec<AppPairRuntimeSnapshot>,
     pub runs: Vec<AppRun>,
+    pub conflict_summaries: Vec<AppConflictSummary>,
+    pub conflict_details: Vec<AppConflictDetail>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,11 +113,30 @@ pub struct AppRun {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppConflictSummary {
+    pub pair_id: String,
+    pub reason: String,
+    pub count: usize,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppConflictDetail {
+    pub id: String,
+    pub pair_id: String,
+    pub canonical_uid: Option<String>,
+    pub reason: String,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AppView {
     Dashboard,
     Runs,
+    Conflicts,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,6 +154,7 @@ pub enum AppCommand {
     DryRun,
     ApplyRun,
     RefreshConflicts,
+    ShowConflicts,
     OpenSetup,
     ShowPairs,
     ShowRuns,
@@ -158,9 +183,12 @@ pub enum AppEvent {
     SelectPair(String),
     ShowDashboard,
     ShowRuns,
+    ShowConflicts,
     CycleRunFilter,
     SelectNextRun,
     SelectPreviousRun,
+    SelectNextConflict,
+    SelectPreviousConflict,
     OpenCommandPalette,
     CloseCommandPalette,
     SelectNextCommand,
@@ -193,6 +221,7 @@ impl AppModel {
             selected_command_index: 0,
             selected_pair_id: config.sync.pairs.first().map(|pair| pair.id.clone()),
             selected_run_id: None,
+            selected_conflict_index: None,
             run_filter: AppRunFilter::All,
             conflict_count: 0,
             last_message: None,
@@ -219,6 +248,8 @@ impl AppModel {
                 })
                 .collect(),
             runs: Vec::new(),
+            conflict_summaries: Vec::new(),
+            conflict_details: Vec::new(),
         }
     }
 
@@ -248,6 +279,21 @@ impl AppModel {
             .get(self.selected_command_index)
             .copied()
             .unwrap_or(AppCommand::DryRun)
+    }
+
+    pub fn selected_conflict_summary(&self) -> Option<&AppConflictSummary> {
+        self.selected_conflict_index
+            .and_then(|index| self.conflict_summaries.get(index))
+    }
+
+    pub fn selected_conflict_details(&self) -> Vec<&AppConflictDetail> {
+        let Some(summary) = self.selected_conflict_summary() else {
+            return Vec::new();
+        };
+        self.conflict_details
+            .iter()
+            .filter(|detail| detail.pair_id == summary.pair_id && detail.reason == summary.reason)
+            .collect()
     }
 
     pub fn shell_snapshot(&self) -> AppShellSnapshot {
@@ -299,6 +345,9 @@ impl AppModel {
         }
         self.runs = snapshot.runs;
         self.ensure_selected_run();
+        self.conflict_summaries = snapshot.conflict_summaries;
+        self.conflict_details = snapshot.conflict_details;
+        self.ensure_selected_conflict();
     }
 
     pub fn select_next_pair(&mut self) {
@@ -315,6 +364,14 @@ impl AppModel {
 
     pub fn select_previous_run(&mut self) {
         self.select_run_by_offset(-1);
+    }
+
+    pub fn select_next_conflict(&mut self) {
+        self.select_conflict_by_offset(1);
+    }
+
+    pub fn select_previous_conflict(&mut self) {
+        self.select_conflict_by_offset(-1);
     }
 
     pub fn update(&mut self, event: AppEvent) -> Vec<AppEffect> {
@@ -350,6 +407,11 @@ impl AppModel {
                 self.ensure_selected_run();
                 Vec::new()
             }
+            AppEvent::ShowConflicts => {
+                self.view = AppView::Conflicts;
+                self.ensure_selected_conflict();
+                Vec::new()
+            }
             AppEvent::CycleRunFilter => {
                 self.run_filter = self.run_filter.next();
                 self.ensure_selected_run();
@@ -361,6 +423,14 @@ impl AppModel {
             }
             AppEvent::SelectPreviousRun => {
                 self.select_previous_run();
+                Vec::new()
+            }
+            AppEvent::SelectNextConflict => {
+                self.select_next_conflict();
+                Vec::new()
+            }
+            AppEvent::SelectPreviousConflict => {
+                self.select_previous_conflict();
                 Vec::new()
             }
             AppEvent::OpenCommandPalette => {
@@ -440,6 +510,31 @@ impl AppModel {
         self.selected_run_id = visible_ids.first().cloned();
     }
 
+    fn select_conflict_by_offset(&mut self, offset: isize) {
+        if self.conflict_summaries.is_empty() {
+            self.selected_conflict_index = None;
+            return;
+        }
+
+        let current = self.selected_conflict_index.unwrap_or(0);
+        let next =
+            (current as isize + offset).rem_euclid(self.conflict_summaries.len() as isize) as usize;
+        self.selected_conflict_index = Some(next);
+    }
+
+    fn ensure_selected_conflict(&mut self) {
+        if self.conflict_summaries.is_empty() {
+            self.selected_conflict_index = None;
+            return;
+        }
+
+        let selected = self
+            .selected_conflict_index
+            .filter(|index| *index < self.conflict_summaries.len())
+            .unwrap_or(0);
+        self.selected_conflict_index = Some(selected);
+    }
+
     fn visible_run_ids(&self) -> Vec<String> {
         self.runs
             .iter()
@@ -463,6 +558,7 @@ impl AppModel {
             AppCommand::DryRun => self.update(AppEvent::StartDryRun),
             AppCommand::ApplyRun => self.update(AppEvent::StartApplyRun),
             AppCommand::RefreshConflicts => self.update(AppEvent::RefreshConflicts),
+            AppCommand::ShowConflicts => self.update(AppEvent::ShowConflicts),
             AppCommand::OpenSetup => self.update(AppEvent::OpenSetup),
             AppCommand::ShowPairs => self.update(AppEvent::ShowDashboard),
             AppCommand::ShowRuns => self.update(AppEvent::ShowRuns),
@@ -496,10 +592,11 @@ impl AppModel {
 }
 
 impl AppCommand {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::DryRun,
         Self::ApplyRun,
         Self::RefreshConflicts,
+        Self::ShowConflicts,
         Self::OpenSetup,
         Self::ShowPairs,
         Self::ShowRuns,
@@ -516,6 +613,7 @@ impl AppCommand {
             Self::DryRun => "Dry-run sync",
             Self::ApplyRun => "Apply sync",
             Self::RefreshConflicts => "Refresh conflicts",
+            Self::ShowConflicts => "Show conflicts",
             Self::OpenSetup => "Open setup",
             Self::ShowPairs => "Show pairs",
             Self::ShowRuns => "Show sync runs",
@@ -529,6 +627,7 @@ impl AppCommand {
             Self::DryRun => "Plan provider changes without writing events",
             Self::ApplyRun => "Execute writes using the current sync plan",
             Self::RefreshConflicts => "Reload unresolved conflict state",
+            Self::ShowConflicts => "Inspect unresolved conflict groups",
             Self::OpenSetup => "Start the guided configuration flow",
             Self::ShowPairs => "Return to the calendar-pair dashboard",
             Self::ShowRuns => "Open recent sync-run history",
@@ -541,6 +640,7 @@ impl AppCommand {
         match self {
             Self::DryRun | Self::ApplyRun => model.enabled_pair_count() > 0,
             Self::RefreshConflicts
+            | Self::ShowConflicts
             | Self::OpenSetup
             | Self::ShowPairs
             | Self::ShowRuns
@@ -596,6 +696,7 @@ mod tests {
             selected_command_index: 0,
             selected_pair_id: None,
             selected_run_id: None,
+            selected_conflict_index: None,
             run_filter: AppRunFilter::All,
             conflict_count: 0,
             last_message: None,
@@ -605,6 +706,8 @@ mod tests {
             recent_error: None,
             pairs: Vec::new(),
             runs: Vec::new(),
+            conflict_summaries: Vec::new(),
+            conflict_details: Vec::new(),
         };
 
         let effects = model.update(AppEvent::StartDryRun);
@@ -622,6 +725,7 @@ mod tests {
             selected_command_index: 0,
             selected_pair_id: Some("a".to_string()),
             selected_run_id: None,
+            selected_conflict_index: None,
             run_filter: AppRunFilter::All,
             conflict_count: 0,
             last_message: None,
@@ -658,6 +762,8 @@ mod tests {
                 },
             ],
             runs: Vec::new(),
+            conflict_summaries: Vec::new(),
+            conflict_details: Vec::new(),
         };
 
         model.select_previous_pair();
@@ -675,6 +781,7 @@ mod tests {
             selected_command_index: 0,
             selected_pair_id: None,
             selected_run_id: None,
+            selected_conflict_index: None,
             run_filter: AppRunFilter::All,
             conflict_count: 0,
             last_message: None,
@@ -684,6 +791,8 @@ mod tests {
             recent_error: None,
             pairs: Vec::new(),
             runs: Vec::new(),
+            conflict_summaries: Vec::new(),
+            conflict_details: Vec::new(),
         };
 
         model.apply_runtime_snapshot(AppRuntimeSnapshot {
@@ -694,6 +803,8 @@ mod tests {
             recent_error: Some("auth failed".to_string()),
             pairs: Vec::new(),
             runs: Vec::new(),
+            conflict_summaries: Vec::new(),
+            conflict_details: Vec::new(),
         });
 
         assert_eq!(model.conflict_count, 3);
@@ -711,6 +822,7 @@ mod tests {
             selected_command_index: 0,
             selected_pair_id: Some("a".to_string()),
             selected_run_id: None,
+            selected_conflict_index: None,
             run_filter: AppRunFilter::All,
             conflict_count: 0,
             last_message: None,
@@ -732,6 +844,8 @@ mod tests {
                 icloud_last_sync_at: None,
             }],
             runs: Vec::new(),
+            conflict_summaries: Vec::new(),
+            conflict_details: Vec::new(),
         };
 
         model.apply_runtime_snapshot(AppRuntimeSnapshot {
@@ -745,6 +859,8 @@ mod tests {
                 icloud_last_sync_at: Some("2026-06-02 12:01:00".to_string()),
             }],
             runs: Vec::new(),
+            conflict_summaries: Vec::new(),
+            conflict_details: Vec::new(),
             ..AppRuntimeSnapshot::default()
         });
 
@@ -765,6 +881,7 @@ mod tests {
             selected_command_index: 0,
             selected_pair_id: None,
             selected_run_id: None,
+            selected_conflict_index: None,
             run_filter: AppRunFilter::All,
             conflict_count: 0,
             last_message: None,
@@ -774,6 +891,8 @@ mod tests {
             recent_error: None,
             pairs: Vec::new(),
             runs: Vec::new(),
+            conflict_summaries: Vec::new(),
+            conflict_details: Vec::new(),
         };
 
         model.apply_runtime_snapshot(AppRuntimeSnapshot {
@@ -813,7 +932,7 @@ mod tests {
     }
 
     #[test]
-    fn command_palette_selects_and_executes_actions() {
+    fn conflict_view_selects_groups_and_filters_details() {
         let mut model = AppModel {
             status: AppStatus::Idle,
             view: AppView::Dashboard,
@@ -821,6 +940,7 @@ mod tests {
             selected_command_index: 0,
             selected_pair_id: None,
             selected_run_id: None,
+            selected_conflict_index: None,
             run_filter: AppRunFilter::All,
             conflict_count: 0,
             last_message: None,
@@ -830,6 +950,83 @@ mod tests {
             recent_error: None,
             pairs: Vec::new(),
             runs: Vec::new(),
+            conflict_summaries: Vec::new(),
+            conflict_details: Vec::new(),
+        };
+
+        model.apply_runtime_snapshot(AppRuntimeSnapshot {
+            conflict_count: 3,
+            conflict_summaries: vec![
+                AppConflictSummary {
+                    pair_id: "personal".to_string(),
+                    reason: "both_sides_changed".to_string(),
+                    count: 2,
+                    first_seen_at: "2026-06-02 12:00:00".to_string(),
+                    last_seen_at: "2026-06-02 12:01:00".to_string(),
+                },
+                AppConflictSummary {
+                    pair_id: "work".to_string(),
+                    reason: "icloud_uid_exists".to_string(),
+                    count: 1,
+                    first_seen_at: "2026-06-02 13:00:00".to_string(),
+                    last_seen_at: "2026-06-02 13:00:00".to_string(),
+                },
+            ],
+            conflict_details: vec![
+                AppConflictDetail {
+                    id: "a".to_string(),
+                    pair_id: "personal".to_string(),
+                    canonical_uid: Some("uid-a".to_string()),
+                    reason: "both_sides_changed".to_string(),
+                    created_at: "2026-06-02 12:01:00".to_string(),
+                },
+                AppConflictDetail {
+                    id: "b".to_string(),
+                    pair_id: "work".to_string(),
+                    canonical_uid: Some("uid-b".to_string()),
+                    reason: "icloud_uid_exists".to_string(),
+                    created_at: "2026-06-02 13:00:00".to_string(),
+                },
+            ],
+            ..AppRuntimeSnapshot::default()
+        });
+
+        model.update(AppEvent::ShowConflicts);
+        assert_eq!(model.view, AppView::Conflicts);
+        assert_eq!(model.selected_conflict_index, Some(0));
+        assert_eq!(model.selected_conflict_details().len(), 1);
+        assert_eq!(
+            model.selected_conflict_details()[0]
+                .canonical_uid
+                .as_deref(),
+            Some("uid-a")
+        );
+
+        model.update(AppEvent::SelectNextConflict);
+        assert_eq!(model.selected_conflict_summary().unwrap().pair_id, "work");
+    }
+
+    #[test]
+    fn command_palette_selects_and_executes_actions() {
+        let mut model = AppModel {
+            status: AppStatus::Idle,
+            view: AppView::Dashboard,
+            command_palette_open: false,
+            selected_command_index: 0,
+            selected_pair_id: None,
+            selected_run_id: None,
+            selected_conflict_index: None,
+            run_filter: AppRunFilter::All,
+            conflict_count: 0,
+            last_message: None,
+            last_run_at: None,
+            last_run_status: None,
+            next_run_at: None,
+            recent_error: None,
+            pairs: Vec::new(),
+            runs: Vec::new(),
+            conflict_summaries: Vec::new(),
+            conflict_details: Vec::new(),
         };
 
         model.update(AppEvent::OpenCommandPalette);
@@ -844,7 +1041,7 @@ mod tests {
         assert_eq!(effects, vec![AppEffect::Quit]);
 
         model.update(AppEvent::OpenCommandPalette);
-        model.selected_command_index = 5;
+        model.selected_command_index = 6;
         let effects = model.update(AppEvent::ExecuteSelectedCommand);
 
         assert_eq!(model.view, AppView::Runs);
@@ -860,6 +1057,7 @@ mod tests {
             selected_command_index: 0,
             selected_pair_id: None,
             selected_run_id: None,
+            selected_conflict_index: None,
             run_filter: AppRunFilter::All,
             conflict_count: 2,
             last_message: Some("ready".to_string()),
@@ -869,6 +1067,8 @@ mod tests {
             recent_error: Some("auth failed".to_string()),
             pairs: Vec::new(),
             runs: Vec::new(),
+            conflict_summaries: Vec::new(),
+            conflict_details: Vec::new(),
         };
 
         let snapshot = model.shell_snapshot();

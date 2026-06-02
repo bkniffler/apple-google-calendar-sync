@@ -150,7 +150,8 @@ insync tui
 The TUI shows sync health, unresolved conflicts, recent run status, configured
 pairs, cached provider calendar names/accounts, raw calendar IDs, per-side last
 sync timestamps from SQLite, and a filterable recent-run history with selected
-run detail. Calendar names are populated after setup discovery or
+run detail. It also has a conflict inspection view (`c`) for unresolved conflict
+groups and selected conflict rows. Calendar names are populated after setup discovery or
 `insync db calendars` has cached provider metadata. Color semantics are kept
 consistent: neutral idle states, blue/cyan active states, green clean states,
 yellow warnings/conflicts, and red failures or destructive actions. Press `:`

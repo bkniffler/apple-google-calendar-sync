@@ -7,8 +7,9 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use insync_app::{
-    AppCommand, AppEffect, AppEvent, AppModel, AppPairRuntimeSnapshot, AppRun, AppRunFilter,
-    AppRuntimeSnapshot, AppShellAction, AppStatus, AppView,
+    AppCommand, AppConflictDetail, AppConflictSummary, AppEffect, AppEvent, AppModel,
+    AppPairRuntimeSnapshot, AppRun, AppRunFilter, AppRuntimeSnapshot, AppShellAction, AppStatus,
+    AppView,
 };
 use insync_config::{
     LOCAL_CONFIG_FILE, SecretStoreKind, SyncPairConfig, app_config_path,
@@ -24,6 +25,10 @@ use insync_db::{
     repositories::{
         calendars::{CalendarRow, list_calendars},
         configured_pairs::{configured_calendar_ids, seed_configured_pairs},
+        sync_conflicts::{
+            ConflictFilter as DbConflictFilter, list_unresolved_conflict_summaries,
+            list_unresolved_conflicts,
+        },
         sync_runs::{SyncRunStatus, recent_sync_runs},
     },
 };
@@ -1293,6 +1298,37 @@ mod tests {
         assert!(output.contains("esc close"));
     }
 
+    #[test]
+    fn tui_conflicts_render_covers_group_and_detail_rows() {
+        let mut model = test_model();
+        model.view = AppView::Conflicts;
+        model.conflict_count = 2;
+        model.selected_conflict_index = Some(0);
+        model.conflict_summaries = vec![AppConflictSummary {
+            pair_id: "personal".to_string(),
+            reason: "both_sides_changed".to_string(),
+            count: 2,
+            first_seen_at: "2026-06-02 12:00:00".to_string(),
+            last_seen_at: "2026-06-02 12:01:00".to_string(),
+        }];
+        model.conflict_details = vec![AppConflictDetail {
+            id: "conflict-1".to_string(),
+            pair_id: "personal".to_string(),
+            canonical_uid: Some("uid-1".to_string()),
+            reason: "both_sides_changed".to_string(),
+            created_at: "2026-06-02 12:01:00".to_string(),
+        }];
+
+        let output = render_tui_to_text(&model, 130, 36);
+
+        assert!(output.contains("Conflict Groups"));
+        assert!(output.contains("personal"));
+        assert!(output.contains("both_sides_changed"));
+        assert!(output.contains("Conflict Detail (2)"));
+        assert!(output.contains("uid-1"));
+        assert!(output.contains("c conflicts"));
+    }
+
     fn test_model() -> AppModel {
         AppModel {
             status: AppStatus::Idle,
@@ -1301,6 +1337,7 @@ mod tests {
             selected_command_index: 0,
             selected_pair_id: None,
             selected_run_id: None,
+            selected_conflict_index: None,
             run_filter: AppRunFilter::All,
             conflict_count: 0,
             last_message: None,
@@ -1310,6 +1347,8 @@ mod tests {
             recent_error: None,
             pairs: Vec::new(),
             runs: Vec::new(),
+            conflict_summaries: Vec::new(),
+            conflict_details: Vec::new(),
         }
     }
 
@@ -1984,6 +2023,8 @@ fn runtime_snapshot_from_doctor(
             .and_then(|run| run.error.clone()),
         pairs: pair_runtime_snapshots(&summary.db_path, config)?,
         runs: run_runtime_snapshots(&summary.db_path)?,
+        conflict_summaries: conflict_summary_snapshots(&summary.db_path)?,
+        conflict_details: conflict_detail_snapshots(&summary.db_path)?,
     })
 }
 
@@ -2049,6 +2090,42 @@ fn run_runtime_snapshots(db_path: &Path) -> Result<Vec<AppRun>> {
             error: run.error,
         })
         .collect())
+}
+
+fn conflict_summary_snapshots(db_path: &Path) -> Result<Vec<AppConflictSummary>> {
+    let conn = open(db_path)?;
+    migrate(&conn)?;
+    Ok(list_unresolved_conflict_summaries(&conn)?
+        .into_iter()
+        .map(|row| AppConflictSummary {
+            pair_id: row.sync_pair_id,
+            reason: row.reason,
+            count: usize::try_from(row.count).unwrap_or(usize::MAX),
+            first_seen_at: row.first_seen_at,
+            last_seen_at: row.last_seen_at,
+        })
+        .collect())
+}
+
+fn conflict_detail_snapshots(db_path: &Path) -> Result<Vec<AppConflictDetail>> {
+    let conn = open(db_path)?;
+    migrate(&conn)?;
+    Ok(list_unresolved_conflicts(
+        &conn,
+        DbConflictFilter {
+            limit: Some(200),
+            ..DbConflictFilter::default()
+        },
+    )?
+    .into_iter()
+    .map(|row| AppConflictDetail {
+        id: row.id,
+        pair_id: row.sync_pair_id,
+        canonical_uid: row.canonical_uid,
+        reason: row.reason,
+        created_at: row.created_at,
+    })
+    .collect())
 }
 
 fn sync_run_status_label(status: SyncRunStatus) -> &'static str {
@@ -2393,11 +2470,17 @@ fn run_tui(mut model: AppModel) -> Result<()> {
                         AppView::Runs => {
                             model.update(AppEvent::SelectNextRun);
                         }
+                        AppView::Conflicts => {
+                            model.update(AppEvent::SelectNextConflict);
+                        }
                     },
                     KeyCode::Up | KeyCode::Char('k') => match model.view {
                         AppView::Dashboard => model.select_previous_pair(),
                         AppView::Runs => {
                             model.update(AppEvent::SelectPreviousRun);
+                        }
+                        AppView::Conflicts => {
+                            model.update(AppEvent::SelectPreviousConflict);
                         }
                     },
                     KeyCode::Esc | KeyCode::Char('p') => {
@@ -2405,6 +2488,9 @@ fn run_tui(mut model: AppModel) -> Result<()> {
                     }
                     KeyCode::Char('l') => {
                         model.update(AppEvent::ShowRuns);
+                    }
+                    KeyCode::Char('c') => {
+                        model.update(AppEvent::ShowConflicts);
                     }
                     KeyCode::Char('f') if model.view == AppView::Runs => {
                         model.update(AppEvent::CycleRunFilter);
@@ -2530,6 +2616,7 @@ fn draw_tui(frame: &mut Frame<'_>, model: &AppModel) {
             }
         }
         AppView::Runs => render_runs_screen(frame, vertical[2], model),
+        AppView::Conflicts => render_conflicts_screen(frame, vertical[2], model),
     }
     render_command_bar(frame, vertical[3], model);
     if model.command_palette_open {
@@ -3132,6 +3219,201 @@ fn render_run_detail(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     );
 }
 
+fn render_conflicts_screen(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+    if area.width < 100 {
+        let body = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(area);
+        render_conflict_summary_table(frame, body[0], model);
+        render_conflict_detail_table(frame, body[1], model);
+    } else {
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(area);
+        render_conflict_summary_table(frame, body[0], model);
+        render_conflict_detail_table(frame, body[1], model);
+    }
+}
+
+fn render_conflict_summary_table(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+    if model.conflict_summaries.is_empty() {
+        render_empty_state(
+            frame,
+            area,
+            "Conflict Groups",
+            &[
+                "No unresolved conflicts.",
+                "Run a sync to refresh conflict state.",
+            ],
+            color_success(),
+        );
+        return;
+    }
+
+    let compact = area.width < 84;
+    let rows = model
+        .conflict_summaries
+        .iter()
+        .enumerate()
+        .map(|(index, summary)| conflict_summary_row(index, summary, model, compact));
+    let table = if compact {
+        Table::new(
+            rows,
+            [
+                Constraint::Length(1),
+                Constraint::Min(14),
+                Constraint::Length(6),
+                Constraint::Percentage(44),
+            ],
+        )
+        .header(
+            Row::new(["", "Pair", "Count", "Reason"]).style(
+                Style::default()
+                    .fg(color_muted())
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
+    } else {
+        Table::new(
+            rows,
+            [
+                Constraint::Length(1),
+                Constraint::Length(18),
+                Constraint::Length(7),
+                Constraint::Percentage(36),
+                Constraint::Percentage(28),
+            ],
+        )
+        .header(
+            Row::new(["", "Pair", "Count", "Reason", "Last Seen"]).style(
+                Style::default()
+                    .fg(color_muted())
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
+    };
+
+    frame.render_widget(table.block(chrome_block("Conflict Groups")), area);
+}
+
+fn conflict_summary_row(
+    index: usize,
+    summary: &AppConflictSummary,
+    model: &AppModel,
+    compact: bool,
+) -> Row<'static> {
+    let selected = model.selected_conflict_index == Some(index);
+    let marker = if selected { ">" } else { " " };
+    let style = if selected {
+        Style::default()
+            .fg(color_warning())
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    };
+
+    let cells = if compact {
+        vec![
+            marker.to_string(),
+            compact_string(&summary.pair_id, 18),
+            summary.count.to_string(),
+            compact_string(&summary.reason, 36),
+        ]
+    } else {
+        vec![
+            marker.to_string(),
+            compact_string(&summary.pair_id, 18),
+            summary.count.to_string(),
+            compact_string(&summary.reason, 42),
+            compact_string(&summary.last_seen_at, 28),
+        ]
+    };
+
+    Row::new(cells).style(style)
+}
+
+fn render_conflict_detail_table(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+    let details = model.selected_conflict_details();
+    if details.is_empty() {
+        render_empty_state(
+            frame,
+            area,
+            "Conflict Detail",
+            &[
+                "No conflict group selected.",
+                "Use j/k to choose a group with detail rows.",
+            ],
+            color_warning(),
+        );
+        return;
+    }
+
+    let compact = area.width < 86;
+    let rows = details
+        .iter()
+        .map(|detail| conflict_detail_row(detail, compact));
+    let table = if compact {
+        Table::new(
+            rows,
+            [
+                Constraint::Min(18),
+                Constraint::Percentage(40),
+                Constraint::Length(20),
+            ],
+        )
+        .header(
+            Row::new(["UID", "Reason", "Created"]).style(
+                Style::default()
+                    .fg(color_muted())
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
+    } else {
+        Table::new(
+            rows,
+            [
+                Constraint::Length(16),
+                Constraint::Percentage(34),
+                Constraint::Percentage(34),
+                Constraint::Length(22),
+            ],
+        )
+        .header(
+            Row::new(["ID", "UID", "Reason", "Created"]).style(
+                Style::default()
+                    .fg(color_muted())
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
+    };
+
+    let title = model
+        .selected_conflict_summary()
+        .map(|summary| format!("Conflict Detail ({})", summary.count))
+        .unwrap_or_else(|| "Conflict Detail".to_string());
+    frame.render_widget(table.block(chrome_block(&title)), area);
+}
+
+fn conflict_detail_row(detail: &AppConflictDetail, compact: bool) -> Row<'static> {
+    if compact {
+        Row::new(vec![
+            compact_string(detail.canonical_uid.as_deref().unwrap_or("-"), 24),
+            compact_string(&detail.reason, 36),
+            compact_string(&detail.created_at, 20),
+        ])
+    } else {
+        Row::new(vec![
+            compact_string(&detail.id, 16),
+            compact_string(detail.canonical_uid.as_deref().unwrap_or("-"), 42),
+            compact_string(&detail.reason, 42),
+            compact_string(&detail.created_at, 22),
+        ])
+    }
+    .style(Style::default().fg(Color::White))
+}
+
 fn render_command_bar(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     let mut spans = vec![
         Span::styled(
@@ -3162,6 +3444,13 @@ fn render_command_bar(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" setup   "),
+        Span::styled(
+            "c",
+            Style::default()
+                .fg(color_warning())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" conflicts   "),
         Span::styled(
             "l",
             Style::default()
@@ -3367,6 +3656,7 @@ fn view_label(view: AppView) -> &'static str {
     match view {
         AppView::Dashboard => "pairs",
         AppView::Runs => "runs",
+        AppView::Conflicts => "conflicts",
     }
 }
 
@@ -3401,6 +3691,7 @@ fn command_color(command: AppCommand) -> Color {
         AppCommand::DryRun => color_running(),
         AppCommand::ApplyRun => color_danger(),
         AppCommand::RefreshConflicts => color_warning(),
+        AppCommand::ShowConflicts => color_warning(),
         AppCommand::OpenSetup => color_neutral(),
         AppCommand::ShowPairs => Color::White,
         AppCommand::ShowRuns => color_success(),
