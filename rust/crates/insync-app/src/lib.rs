@@ -12,6 +12,9 @@ pub struct AppModel {
     pub selected_run_id: Option<String>,
     pub selected_conflict_index: Option<usize>,
     pub run_filter: AppRunFilter,
+    pub report_filter: AppReportFilter,
+    pub report_sort: AppReportSort,
+    pub selected_report_index: Option<usize>,
     pub background_paused: bool,
     pub conflict_count: usize,
     pub last_message: Option<String>,
@@ -21,6 +24,7 @@ pub struct AppModel {
     pub recent_error: Option<String>,
     pub pairs: Vec<AppPair>,
     pub runs: Vec<AppRun>,
+    pub report_rows: Vec<AppReportRow>,
     pub conflict_summaries: Vec<AppConflictSummary>,
     pub conflict_details: Vec<AppConflictDetail>,
 }
@@ -49,6 +53,7 @@ pub struct AppRuntimeSnapshot {
     pub recent_error: Option<String>,
     pub pairs: Vec<AppPairRuntimeSnapshot>,
     pub runs: Vec<AppRun>,
+    pub report_rows: Vec<AppReportRow>,
     pub conflict_summaries: Vec<AppConflictSummary>,
     pub conflict_details: Vec<AppConflictDetail>,
 }
@@ -116,6 +121,18 @@ pub struct AppRun {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppReportRow {
+    pub pair_id: String,
+    pub action: String,
+    pub reason: String,
+    pub resolution: String,
+    pub title: String,
+    pub google_present: String,
+    pub icloud_present: String,
+    pub diff_fields: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppConflictSummary {
     pub pair_id: String,
     pub reason: String,
@@ -138,6 +155,7 @@ pub struct AppConflictDetail {
 pub enum AppView {
     Dashboard,
     Runs,
+    Reports,
     Conflicts,
 }
 
@@ -152,6 +170,24 @@ pub enum AppRunFilter {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum AppReportFilter {
+    All,
+    Creates,
+    Updates,
+    Deletes,
+    Conflicts,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppReportSort {
+    Pair,
+    Action,
+    Title,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AppCommand {
     DryRun,
     ApplyRun,
@@ -160,6 +196,7 @@ pub enum AppCommand {
     OpenSetup,
     ShowPairs,
     ShowRuns,
+    ShowReports,
     ToggleBackgroundPause,
     ExportReport,
     Quit,
@@ -186,10 +223,15 @@ pub enum AppEvent {
     SelectPair(String),
     ShowDashboard,
     ShowRuns,
+    ShowReports,
     ShowConflicts,
     CycleRunFilter,
+    CycleReportFilter,
+    CycleReportSort,
     SelectNextRun,
     SelectPreviousRun,
+    SelectNextReportRow,
+    SelectPreviousReportRow,
     SelectNextConflict,
     SelectPreviousConflict,
     OpenCommandPalette,
@@ -226,6 +268,9 @@ impl AppModel {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            report_filter: AppReportFilter::All,
+            report_sort: AppReportSort::Pair,
+            selected_report_index: None,
             background_paused: false,
             conflict_count: 0,
             last_message: None,
@@ -252,6 +297,7 @@ impl AppModel {
                 })
                 .collect(),
             runs: Vec::new(),
+            report_rows: Vec::new(),
             conflict_summaries: Vec::new(),
             conflict_details: Vec::new(),
         }
@@ -276,6 +322,21 @@ impl AppModel {
     pub fn selected_run(&self) -> Option<&AppRun> {
         let selected_run_id = self.selected_run_id.as_deref()?;
         self.runs.iter().find(|run| run.id == selected_run_id)
+    }
+
+    pub fn visible_report_rows(&self) -> Vec<&AppReportRow> {
+        let mut rows = self
+            .report_rows
+            .iter()
+            .filter(|row| self.report_filter.matches(row))
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| self.report_sort.cmp(left, right));
+        rows
+    }
+
+    pub fn selected_report_row(&self) -> Option<&AppReportRow> {
+        let selected_index = self.selected_report_index?;
+        self.visible_report_rows().get(selected_index).copied()
     }
 
     pub fn selected_command(&self) -> AppCommand {
@@ -350,6 +411,8 @@ impl AppModel {
         }
         self.runs = snapshot.runs;
         self.ensure_selected_run();
+        self.report_rows = snapshot.report_rows;
+        self.ensure_selected_report_row();
         self.conflict_summaries = snapshot.conflict_summaries;
         self.conflict_details = snapshot.conflict_details;
         self.ensure_selected_conflict();
@@ -369,6 +432,14 @@ impl AppModel {
 
     pub fn select_previous_run(&mut self) {
         self.select_run_by_offset(-1);
+    }
+
+    pub fn select_next_report_row(&mut self) {
+        self.select_report_row_by_offset(1);
+    }
+
+    pub fn select_previous_report_row(&mut self) {
+        self.select_report_row_by_offset(-1);
     }
 
     pub fn select_next_conflict(&mut self) {
@@ -414,6 +485,11 @@ impl AppModel {
                 self.ensure_selected_run();
                 Vec::new()
             }
+            AppEvent::ShowReports => {
+                self.view = AppView::Reports;
+                self.ensure_selected_report_row();
+                Vec::new()
+            }
             AppEvent::ShowConflicts => {
                 self.view = AppView::Conflicts;
                 self.ensure_selected_conflict();
@@ -424,12 +500,30 @@ impl AppModel {
                 self.ensure_selected_run();
                 Vec::new()
             }
+            AppEvent::CycleReportFilter => {
+                self.report_filter = self.report_filter.next();
+                self.ensure_selected_report_row();
+                Vec::new()
+            }
+            AppEvent::CycleReportSort => {
+                self.report_sort = self.report_sort.next();
+                self.ensure_selected_report_row();
+                Vec::new()
+            }
             AppEvent::SelectNextRun => {
                 self.select_next_run();
                 Vec::new()
             }
             AppEvent::SelectPreviousRun => {
                 self.select_previous_run();
+                Vec::new()
+            }
+            AppEvent::SelectNextReportRow => {
+                self.select_next_report_row();
+                Vec::new()
+            }
+            AppEvent::SelectPreviousReportRow => {
+                self.select_previous_report_row();
                 Vec::new()
             }
             AppEvent::SelectNextConflict => {
@@ -517,6 +611,34 @@ impl AppModel {
         self.selected_run_id = visible_ids.first().cloned();
     }
 
+    fn select_report_row_by_offset(&mut self, offset: isize) {
+        let visible_count = self.visible_report_rows().len();
+        if visible_count == 0 {
+            self.selected_report_index = None;
+            return;
+        }
+
+        let current = self
+            .selected_report_index
+            .filter(|index| *index < visible_count)
+            .unwrap_or(0);
+        let next = (current as isize + offset).rem_euclid(visible_count as isize) as usize;
+        self.selected_report_index = Some(next);
+    }
+
+    fn ensure_selected_report_row(&mut self) {
+        let visible_count = self.visible_report_rows().len();
+        if visible_count == 0 {
+            self.selected_report_index = None;
+            return;
+        }
+        let selected = self
+            .selected_report_index
+            .filter(|index| *index < visible_count)
+            .unwrap_or(0);
+        self.selected_report_index = Some(selected);
+    }
+
     fn select_conflict_by_offset(&mut self, offset: isize) {
         if self.conflict_summaries.is_empty() {
             self.selected_conflict_index = None;
@@ -569,6 +691,7 @@ impl AppModel {
             AppCommand::OpenSetup => self.update(AppEvent::OpenSetup),
             AppCommand::ShowPairs => self.update(AppEvent::ShowDashboard),
             AppCommand::ShowRuns => self.update(AppEvent::ShowRuns),
+            AppCommand::ShowReports => self.update(AppEvent::ShowReports),
             AppCommand::ToggleBackgroundPause => {
                 if self.background_paused {
                     self.update(AppEvent::StartDaemon)
@@ -612,7 +735,7 @@ impl AppModel {
 }
 
 impl AppCommand {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::DryRun,
         Self::ApplyRun,
         Self::RefreshConflicts,
@@ -620,6 +743,7 @@ impl AppCommand {
         Self::OpenSetup,
         Self::ShowPairs,
         Self::ShowRuns,
+        Self::ShowReports,
         Self::ToggleBackgroundPause,
         Self::ExportReport,
         Self::Quit,
@@ -638,6 +762,7 @@ impl AppCommand {
             Self::OpenSetup => "Open setup",
             Self::ShowPairs => "Show pairs",
             Self::ShowRuns => "Show sync runs",
+            Self::ShowReports => "Show dry-run report",
             Self::ToggleBackgroundPause => "Pause background",
             Self::ExportReport => "Export report",
             Self::Quit => "Quit",
@@ -660,6 +785,7 @@ impl AppCommand {
             Self::OpenSetup => "Start the guided configuration flow",
             Self::ShowPairs => "Return to the calendar-pair dashboard",
             Self::ShowRuns => "Open recent sync-run history",
+            Self::ShowReports => "Open the latest dry-run report rows",
             Self::ToggleBackgroundPause => "Pause the background scheduler",
             Self::ExportReport => "Export the latest dry-run report",
             Self::Quit => "Close the terminal dashboard",
@@ -683,6 +809,7 @@ impl AppCommand {
             | Self::OpenSetup
             | Self::ShowPairs
             | Self::ShowRuns
+            | Self::ShowReports
             | Self::ToggleBackgroundPause
             | Self::ExportReport
             | Self::Quit => true,
@@ -723,6 +850,83 @@ impl AppRunFilter {
     }
 }
 
+impl AppReportFilter {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Creates => "creates",
+            Self::Updates => "updates",
+            Self::Deletes => "deletes",
+            Self::Conflicts => "conflicts",
+        }
+    }
+
+    fn matches(self, row: &AppReportRow) -> bool {
+        let action = row.action.as_str();
+        let reason = row.reason.as_str();
+        let resolution = row.resolution.as_str();
+        match self {
+            Self::All => true,
+            Self::Creates => action.contains("create"),
+            Self::Updates => action.contains("update"),
+            Self::Deletes => action.contains("delete"),
+            Self::Conflicts => {
+                action.contains("conflict")
+                    || reason.contains("conflict")
+                    || resolution.contains("manual")
+            }
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::All => Self::Creates,
+            Self::Creates => Self::Updates,
+            Self::Updates => Self::Deletes,
+            Self::Deletes => Self::Conflicts,
+            Self::Conflicts => Self::All,
+        }
+    }
+}
+
+impl AppReportSort {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pair => "pair",
+            Self::Action => "action",
+            Self::Title => "title",
+        }
+    }
+
+    fn cmp(self, left: &AppReportRow, right: &AppReportRow) -> std::cmp::Ordering {
+        match self {
+            Self::Pair => left
+                .pair_id
+                .cmp(&right.pair_id)
+                .then_with(|| left.action.cmp(&right.action))
+                .then_with(|| left.title.cmp(&right.title)),
+            Self::Action => left
+                .action
+                .cmp(&right.action)
+                .then_with(|| left.pair_id.cmp(&right.pair_id))
+                .then_with(|| left.title.cmp(&right.title)),
+            Self::Title => left
+                .title
+                .cmp(&right.title)
+                .then_with(|| left.pair_id.cmp(&right.pair_id))
+                .then_with(|| left.action.cmp(&right.action)),
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::Pair => Self::Action,
+            Self::Action => Self::Title,
+            Self::Title => Self::Pair,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -738,6 +942,9 @@ mod tests {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            report_filter: AppReportFilter::All,
+            report_sort: AppReportSort::Pair,
+            selected_report_index: None,
             background_paused: false,
             conflict_count: 0,
             last_message: None,
@@ -747,6 +954,7 @@ mod tests {
             recent_error: None,
             pairs: Vec::new(),
             runs: Vec::new(),
+            report_rows: Vec::new(),
             conflict_summaries: Vec::new(),
             conflict_details: Vec::new(),
         };
@@ -768,6 +976,9 @@ mod tests {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            report_filter: AppReportFilter::All,
+            report_sort: AppReportSort::Pair,
+            selected_report_index: None,
             background_paused: false,
             conflict_count: 0,
             last_message: None,
@@ -804,6 +1015,7 @@ mod tests {
                 },
             ],
             runs: Vec::new(),
+            report_rows: Vec::new(),
             conflict_summaries: Vec::new(),
             conflict_details: Vec::new(),
         };
@@ -825,6 +1037,9 @@ mod tests {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            report_filter: AppReportFilter::All,
+            report_sort: AppReportSort::Pair,
+            selected_report_index: None,
             background_paused: false,
             conflict_count: 0,
             last_message: None,
@@ -834,6 +1049,7 @@ mod tests {
             recent_error: None,
             pairs: Vec::new(),
             runs: Vec::new(),
+            report_rows: Vec::new(),
             conflict_summaries: Vec::new(),
             conflict_details: Vec::new(),
         };
@@ -846,6 +1062,7 @@ mod tests {
             recent_error: Some("auth failed".to_string()),
             pairs: Vec::new(),
             runs: Vec::new(),
+            report_rows: Vec::new(),
             conflict_summaries: Vec::new(),
             conflict_details: Vec::new(),
         });
@@ -867,6 +1084,9 @@ mod tests {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            report_filter: AppReportFilter::All,
+            report_sort: AppReportSort::Pair,
+            selected_report_index: None,
             background_paused: false,
             conflict_count: 0,
             last_message: None,
@@ -888,6 +1108,7 @@ mod tests {
                 icloud_last_sync_at: None,
             }],
             runs: Vec::new(),
+            report_rows: Vec::new(),
             conflict_summaries: Vec::new(),
             conflict_details: Vec::new(),
         };
@@ -903,6 +1124,7 @@ mod tests {
                 icloud_last_sync_at: Some("2026-06-02 12:01:00".to_string()),
             }],
             runs: Vec::new(),
+            report_rows: Vec::new(),
             conflict_summaries: Vec::new(),
             conflict_details: Vec::new(),
             ..AppRuntimeSnapshot::default()
@@ -927,6 +1149,9 @@ mod tests {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            report_filter: AppReportFilter::All,
+            report_sort: AppReportSort::Pair,
+            selected_report_index: None,
             background_paused: false,
             conflict_count: 0,
             last_message: None,
@@ -936,6 +1161,7 @@ mod tests {
             recent_error: None,
             pairs: Vec::new(),
             runs: Vec::new(),
+            report_rows: Vec::new(),
             conflict_summaries: Vec::new(),
             conflict_details: Vec::new(),
         };
@@ -977,6 +1203,65 @@ mod tests {
     }
 
     #[test]
+    fn report_view_filters_sorts_and_selects_rows() {
+        let mut model = AppModel::from_config(&ServiceConfig::default());
+
+        model.apply_runtime_snapshot(AppRuntimeSnapshot {
+            report_rows: vec![
+                AppReportRow {
+                    pair_id: "work".to_string(),
+                    action: "update_google".to_string(),
+                    reason: "google_changed".to_string(),
+                    resolution: "apply".to_string(),
+                    title: "Budget review".to_string(),
+                    google_present: "yes".to_string(),
+                    icloud_present: "yes".to_string(),
+                    diff_fields: "title,start".to_string(),
+                },
+                AppReportRow {
+                    pair_id: "personal".to_string(),
+                    action: "create_icloud".to_string(),
+                    reason: "missing_icloud".to_string(),
+                    resolution: "apply".to_string(),
+                    title: "Dentist".to_string(),
+                    google_present: "yes".to_string(),
+                    icloud_present: "no".to_string(),
+                    diff_fields: String::new(),
+                },
+                AppReportRow {
+                    pair_id: "personal".to_string(),
+                    action: "manual_conflict".to_string(),
+                    reason: "both_sides_changed".to_string(),
+                    resolution: "manual".to_string(),
+                    title: "Planning".to_string(),
+                    google_present: "yes".to_string(),
+                    icloud_present: "yes".to_string(),
+                    diff_fields: "title".to_string(),
+                },
+            ],
+            ..AppRuntimeSnapshot::default()
+        });
+
+        model.update(AppEvent::ShowReports);
+        assert_eq!(model.view, AppView::Reports);
+        assert_eq!(model.selected_report_row().unwrap().pair_id, "personal");
+
+        model.update(AppEvent::CycleReportFilter);
+        assert_eq!(model.report_filter, AppReportFilter::Creates);
+        assert_eq!(model.visible_report_rows().len(), 1);
+        assert_eq!(model.selected_report_row().unwrap().title, "Dentist");
+
+        model.update(AppEvent::CycleReportFilter);
+        assert_eq!(model.report_filter, AppReportFilter::Updates);
+        assert_eq!(model.selected_report_row().unwrap().title, "Budget review");
+
+        model.update(AppEvent::CycleReportSort);
+        assert_eq!(model.report_sort, AppReportSort::Action);
+        model.update(AppEvent::SelectNextReportRow);
+        assert_eq!(model.selected_report_index, Some(0));
+    }
+
+    #[test]
     fn conflict_view_selects_groups_and_filters_details() {
         let mut model = AppModel {
             status: AppStatus::Idle,
@@ -987,6 +1272,9 @@ mod tests {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            report_filter: AppReportFilter::All,
+            report_sort: AppReportSort::Pair,
+            selected_report_index: None,
             background_paused: false,
             conflict_count: 0,
             last_message: None,
@@ -996,6 +1284,7 @@ mod tests {
             recent_error: None,
             pairs: Vec::new(),
             runs: Vec::new(),
+            report_rows: Vec::new(),
             conflict_summaries: Vec::new(),
             conflict_details: Vec::new(),
         };
@@ -1063,6 +1352,9 @@ mod tests {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            report_filter: AppReportFilter::All,
+            report_sort: AppReportSort::Pair,
+            selected_report_index: None,
             background_paused: false,
             conflict_count: 0,
             last_message: None,
@@ -1072,6 +1364,7 @@ mod tests {
             recent_error: None,
             pairs: Vec::new(),
             runs: Vec::new(),
+            report_rows: Vec::new(),
             conflict_summaries: Vec::new(),
             conflict_details: Vec::new(),
         };
@@ -1145,6 +1438,9 @@ mod tests {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            report_filter: AppReportFilter::All,
+            report_sort: AppReportSort::Pair,
+            selected_report_index: None,
             background_paused: false,
             conflict_count: 2,
             last_message: Some("ready".to_string()),
@@ -1154,6 +1450,7 @@ mod tests {
             recent_error: Some("auth failed".to_string()),
             pairs: Vec::new(),
             runs: Vec::new(),
+            report_rows: Vec::new(),
             conflict_summaries: Vec::new(),
             conflict_details: Vec::new(),
         };

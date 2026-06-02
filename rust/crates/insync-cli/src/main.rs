@@ -8,9 +8,11 @@ use crossterm::{
 };
 use insync_app::{
     AppCommand, AppConflictDetail, AppConflictSummary, AppEffect, AppEvent, AppModel,
-    AppNotificationSeverity, AppPairRuntimeSnapshot, AppRun, AppRunFilter, AppRuntimeSnapshot,
+    AppNotificationSeverity, AppPairRuntimeSnapshot, AppReportRow, AppRun, AppRuntimeSnapshot,
     AppShellAction, AppStatus, AppView,
 };
+#[cfg(test)]
+use insync_app::{AppReportFilter, AppReportSort, AppRunFilter};
 use insync_config::{
     LOCAL_CONFIG_FILE, SecretStoreKind, SyncPairConfig, app_config_path,
     credentials::{
@@ -1244,7 +1246,7 @@ mod tests {
         assert!(output.contains("insync"));
         assert!(output.contains("No calendar pairs configured."));
         assert!(output.contains("Run setup or press s"));
-        assert!(output.contains(": palette"));
+        assert!(output.contains(": pal"));
         assert!(output.contains("b pause"));
         assert!(output.contains("No runs yet"));
         assert!(output.contains("Notifications"));
@@ -1297,9 +1299,52 @@ mod tests {
         assert!(output.contains("> Apply sync"));
         assert!(output.contains("Dry-run sync"));
         assert!(output.contains("Pause background"));
+        assert!(output.contains("Show dry-run report"));
         assert!(output.contains("Export report"));
         assert!(output.contains("enter run"));
         assert!(output.contains("esc close"));
+    }
+
+    #[test]
+    fn tui_reports_render_filter_sort_rows_and_detail() {
+        let mut model = test_model();
+        model.view = AppView::Reports;
+        model.report_filter = AppReportFilter::All;
+        model.report_sort = AppReportSort::Pair;
+        model.selected_report_index = Some(0);
+        model.report_rows = vec![
+            AppReportRow {
+                pair_id: "work".to_string(),
+                action: "update_google".to_string(),
+                reason: "google_changed".to_string(),
+                resolution: "apply".to_string(),
+                title: "Budget review".to_string(),
+                google_present: "yes".to_string(),
+                icloud_present: "yes".to_string(),
+                diff_fields: "title,start".to_string(),
+            },
+            AppReportRow {
+                pair_id: "personal".to_string(),
+                action: "create_icloud".to_string(),
+                reason: "missing_icloud".to_string(),
+                resolution: "apply".to_string(),
+                title: "Dentist".to_string(),
+                google_present: "yes".to_string(),
+                icloud_present: "no".to_string(),
+                diff_fields: String::new(),
+            },
+        ];
+
+        let output = render_tui_to_text(&model, 132, 36);
+
+        assert!(output.contains("Dry-Run Report (2/2, filter all, sort pair)"));
+        assert!(output.contains("personal"));
+        assert!(output.contains("create_icloud"));
+        assert!(output.contains("Dentist"));
+        assert!(output.contains("Report Detail"));
+        assert!(output.contains("Present: Google yes / iCloud no"));
+        assert!(output.contains("v report"));
+        assert!(output.contains("t sort"));
     }
 
     #[test]
@@ -1330,7 +1375,7 @@ mod tests {
         assert!(output.contains("both_sides_changed"));
         assert!(output.contains("Conflict Detail (2)"));
         assert!(output.contains("uid-1"));
-        assert!(output.contains("c conflicts"));
+        assert!(output.contains("c conf"));
     }
 
     #[test]
@@ -1353,7 +1398,7 @@ mod tests {
         let mut model = test_model();
         model.background_paused = true;
         model.command_palette_open = true;
-        model.selected_command_index = 7;
+        model.selected_command_index = 8;
 
         let output = render_tui_to_text(&model, 120, 34);
 
@@ -1372,6 +1417,9 @@ mod tests {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            report_filter: AppReportFilter::All,
+            report_sort: AppReportSort::Pair,
+            selected_report_index: None,
             background_paused: false,
             conflict_count: 0,
             last_message: None,
@@ -1381,6 +1429,7 @@ mod tests {
             recent_error: None,
             pairs: Vec::new(),
             runs: Vec::new(),
+            report_rows: Vec::new(),
             conflict_summaries: Vec::new(),
             conflict_details: Vec::new(),
         }
@@ -2057,6 +2106,7 @@ fn runtime_snapshot_from_doctor(
             .and_then(|run| run.error.clone()),
         pairs: pair_runtime_snapshots(&summary.db_path, config)?,
         runs: run_runtime_snapshots(&summary.db_path)?,
+        report_rows: Vec::new(),
         conflict_summaries: conflict_summary_snapshots(&summary.db_path)?,
         conflict_details: conflict_detail_snapshots(&summary.db_path)?,
     })
@@ -2504,6 +2554,9 @@ fn run_tui(mut model: AppModel) -> Result<()> {
                         AppView::Runs => {
                             model.update(AppEvent::SelectNextRun);
                         }
+                        AppView::Reports => {
+                            model.update(AppEvent::SelectNextReportRow);
+                        }
                         AppView::Conflicts => {
                             model.update(AppEvent::SelectNextConflict);
                         }
@@ -2512,6 +2565,9 @@ fn run_tui(mut model: AppModel) -> Result<()> {
                         AppView::Dashboard => model.select_previous_pair(),
                         AppView::Runs => {
                             model.update(AppEvent::SelectPreviousRun);
+                        }
+                        AppView::Reports => {
+                            model.update(AppEvent::SelectPreviousReportRow);
                         }
                         AppView::Conflicts => {
                             model.update(AppEvent::SelectPreviousConflict);
@@ -2523,11 +2579,20 @@ fn run_tui(mut model: AppModel) -> Result<()> {
                     KeyCode::Char('l') => {
                         model.update(AppEvent::ShowRuns);
                     }
+                    KeyCode::Char('v') => {
+                        model.update(AppEvent::ShowReports);
+                    }
                     KeyCode::Char('c') => {
                         model.update(AppEvent::ShowConflicts);
                     }
                     KeyCode::Char('f') if model.view == AppView::Runs => {
                         model.update(AppEvent::CycleRunFilter);
+                    }
+                    KeyCode::Char('f') if model.view == AppView::Reports => {
+                        model.update(AppEvent::CycleReportFilter);
+                    }
+                    KeyCode::Char('t') if model.view == AppView::Reports => {
+                        model.update(AppEvent::CycleReportSort);
                     }
                     KeyCode::Char('d') => {
                         let effects = model.update(AppEvent::ExecuteCommand(AppCommand::DryRun));
@@ -2669,6 +2734,7 @@ fn draw_tui(frame: &mut Frame<'_>, model: &AppModel) {
             }
         }
         AppView::Runs => render_runs_screen(frame, vertical[2], model),
+        AppView::Reports => render_reports_screen(frame, vertical[2], model),
         AppView::Conflicts => render_conflicts_screen(frame, vertical[2], model),
     }
     if has_notifications {
@@ -2708,7 +2774,20 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
         Span::raw("  Filter "),
         Span::styled(
             model.run_filter.label(),
-            Style::default().fg(if model.view == AppView::Runs {
+            Style::default().fg(match model.view {
+                AppView::Runs => color_warning(),
+                AppView::Reports => color_muted(),
+                _ => color_muted(),
+            }),
+        ),
+        Span::raw("  Report "),
+        Span::styled(
+            format!(
+                "{}/{}",
+                model.report_filter.label(),
+                model.report_sort.label()
+            ),
+            Style::default().fg(if model.view == AppView::Reports {
                 color_warning()
             } else {
                 color_muted()
@@ -3311,6 +3390,184 @@ fn render_run_detail(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     );
 }
 
+fn render_reports_screen(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+    if area.width < 100 {
+        let body = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+            .split(area);
+        render_report_table(frame, body[0], model);
+        render_report_detail(frame, body[1], model);
+    } else {
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(66), Constraint::Percentage(34)])
+            .split(area);
+        render_report_table(frame, body[0], model);
+        render_report_detail(frame, body[1], model);
+    }
+}
+
+fn render_report_table(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+    let visible_rows = model.visible_report_rows();
+    if visible_rows.is_empty() {
+        let lines: &[&str] = if model.report_rows.is_empty() {
+            &[
+                "No dry-run report rows loaded.",
+                "Run a dry-run with reporting to populate this view.",
+            ]
+        } else {
+            &[
+                "No report rows match this filter.",
+                "Press f to cycle action categories.",
+            ]
+        };
+        render_empty_state(frame, area, "Dry-Run Report", lines, color_warning());
+        return;
+    }
+
+    let compact = area.width < 96;
+    let rows = visible_rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| report_row(index, row, model, compact));
+    let table = if compact {
+        Table::new(
+            rows,
+            [
+                Constraint::Length(1),
+                Constraint::Length(14),
+                Constraint::Length(16),
+                Constraint::Min(20),
+            ],
+        )
+        .header(
+            Row::new(["", "Pair", "Action", "Title"]).style(
+                Style::default()
+                    .fg(color_muted())
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
+    } else {
+        Table::new(
+            rows,
+            [
+                Constraint::Length(1),
+                Constraint::Length(16),
+                Constraint::Length(20),
+                Constraint::Percentage(28),
+                Constraint::Percentage(24),
+                Constraint::Percentage(20),
+            ],
+        )
+        .header(
+            Row::new(["", "Pair", "Action", "Title", "Reason", "Resolution"]).style(
+                Style::default()
+                    .fg(color_muted())
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
+    };
+
+    let title = format!(
+        "Dry-Run Report ({}/{}, filter {}, sort {})",
+        visible_rows.len(),
+        model.report_rows.len(),
+        model.report_filter.label(),
+        model.report_sort.label()
+    );
+    frame.render_widget(table.block(chrome_block(&title)), area);
+}
+
+fn report_row(index: usize, row: &AppReportRow, model: &AppModel, compact: bool) -> Row<'static> {
+    let selected = model.selected_report_index == Some(index);
+    let marker = if selected { ">" } else { " " };
+    let style = if selected {
+        Style::default()
+            .fg(color_running())
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(report_action_color(&row.action))
+    };
+
+    let cells = if compact {
+        vec![
+            marker.to_string(),
+            compact_string(&row.pair_id, 14),
+            compact_string(&row.action, 16),
+            compact_string(&row.title, 36),
+        ]
+    } else {
+        vec![
+            marker.to_string(),
+            compact_string(&row.pair_id, 16),
+            compact_string(&row.action, 20),
+            compact_string(&row.title, 36),
+            compact_string(&row.reason, 32),
+            compact_string(&row.resolution, 28),
+        ]
+    };
+
+    Row::new(cells).style(style)
+}
+
+fn render_report_detail(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+    let lines = if let Some(row) = model.selected_report_row() {
+        vec![
+            Line::from(vec![Span::styled(
+                compact_string(&row.action, 32),
+                Style::default()
+                    .fg(report_action_color(&row.action))
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(format!(
+                "Pair: {}",
+                compact_detail_value(&row.pair_id, area.width)
+            )),
+            Line::from(format!(
+                "Title: {}",
+                compact_detail_value(&row.title, area.width)
+            )),
+            Line::from(format!(
+                "Reason: {}",
+                compact_detail_value(&row.reason, area.width)
+            )),
+            Line::from(format!(
+                "Resolution: {}",
+                compact_detail_value(&row.resolution, area.width)
+            )),
+            Line::from(format!(
+                "Present: Google {} / iCloud {}",
+                empty_dash(&row.google_present),
+                empty_dash(&row.icloud_present)
+            )),
+            Line::from(format!(
+                "Diff: {}",
+                compact_detail_value(empty_dash(&row.diff_fields), area.width)
+            )),
+        ]
+    } else {
+        render_empty_state(
+            frame,
+            area,
+            "Report Detail",
+            &[
+                "No report row selected.",
+                "Use f/t to change filter and sort.",
+            ],
+            color_warning(),
+        );
+        return;
+    };
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(chrome_block("Report Detail"))
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
 fn render_conflicts_screen(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     if area.width < 100 {
         let body = Layout::default()
@@ -3528,21 +3785,21 @@ fn render_command_bar(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
                 .fg(color_warning())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" refresh   "),
+        Span::raw(" ref   "),
         Span::styled(
             "s",
             Style::default()
                 .fg(color_neutral())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" setup   "),
+        Span::raw(" set   "),
         Span::styled(
             "c",
             Style::default()
                 .fg(color_warning())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" conflicts   "),
+        Span::raw(" conf   "),
         Span::styled(
             "l",
             Style::default()
@@ -3550,6 +3807,13 @@ fn render_command_bar(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" runs   "),
+        Span::styled(
+            "v",
+            Style::default()
+                .fg(color_checking())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" report   "),
         Span::styled(
             "p",
             Style::default()
@@ -3574,10 +3838,10 @@ fn render_command_bar(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
                 .fg(color_running())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" palette   "),
+        Span::raw(" pal   "),
     ];
 
-    if model.view == AppView::Runs {
+    if model.view == AppView::Runs || model.view == AppView::Reports {
         spans.extend([
             Span::styled(
                 "f",
@@ -3586,6 +3850,17 @@ fn render_command_bar(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" filter   "),
+        ]);
+    }
+    if model.view == AppView::Reports {
+        spans.extend([
+            Span::styled(
+                "t",
+                Style::default()
+                    .fg(color_checking())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" sort   "),
         ]);
     }
 
@@ -3759,6 +4034,7 @@ fn view_label(view: AppView) -> &'static str {
     match view {
         AppView::Dashboard => "pairs",
         AppView::Runs => "runs",
+        AppView::Reports => "reports",
         AppView::Conflicts => "conflicts",
     }
 }
@@ -3798,9 +4074,24 @@ fn command_color(command: AppCommand) -> Color {
         AppCommand::OpenSetup => color_neutral(),
         AppCommand::ShowPairs => Color::White,
         AppCommand::ShowRuns => color_success(),
+        AppCommand::ShowReports => color_checking(),
         AppCommand::ToggleBackgroundPause => color_warning(),
         AppCommand::ExportReport => color_checking(),
         AppCommand::Quit => color_danger(),
+    }
+}
+
+fn report_action_color(action: &str) -> Color {
+    if action.contains("delete") {
+        color_danger()
+    } else if action.contains("conflict") || action.contains("manual") {
+        color_warning()
+    } else if action.contains("create") {
+        color_success()
+    } else if action.contains("update") {
+        color_running()
+    } else {
+        Color::White
     }
 }
 
@@ -3911,6 +4202,10 @@ fn calendar_detail_label(name: Option<&str>, account: Option<&str>, fallback_id:
 fn compact_detail_value(value: &str, area_width: u16) -> String {
     let max = usize::from(area_width.saturating_sub(14)).clamp(16, 64);
     compact_string(value, max)
+}
+
+fn empty_dash(value: &str) -> &str {
+    if value.is_empty() { "-" } else { value }
 }
 
 fn compact_string(value: &str, max: usize) -> String {

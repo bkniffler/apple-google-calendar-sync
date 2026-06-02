@@ -155,7 +155,8 @@ The TUI shows sync health, unresolved conflicts, recent run status, configured
 pairs, cached provider calendar names/accounts, raw calendar IDs, per-side last
 sync timestamps from SQLite, and a filterable recent-run history with selected
 run detail. It also has a conflict inspection view (`c`) for unresolved conflict
-groups and selected conflict rows, plus a notification band for failed syncs,
+groups and selected conflict rows, a dry-run report viewer (`v`) with action
+filters (`f`) and sort modes (`t`), plus a notification band for failed syncs,
 unresolved conflicts, and setup nudges. Calendar names are populated after setup
 discovery or `insync db calendars` has cached provider metadata. Color semantics
 are kept consistent: neutral idle states, blue/cyan active states, green clean
@@ -163,12 +164,12 @@ states, yellow warnings/conflicts, and red failures or destructive actions.
 Press `:` inside the TUI to open the command palette for dry-run, apply,
 conflict refresh, setup, view switching, report export, and quit actions. The
 same shell actions are exposed as safe quick actions, including immediate
-dry-run/apply, conflict inspection, and background pause/resume (`b`). The
-key dashboard, run history, conflict, notification, and command-palette screens
-have buffer-level render tests to catch layout regressions. The TUI drives
-commands through `insync-app` events/effects, and `insync-app` exposes a shell
-snapshot with status, actions, and notifications for future tray or menu-bar
-shells.
+dry-run/apply, conflict inspection, and background pause/resume (`b`). The key
+dashboard, run history, report, conflict, notification, and command-palette
+screens have buffer-level render tests to catch layout regressions. The TUI
+drives commands through `insync-app` events/effects, and `insync-app` exposes a
+shell snapshot with status, actions, and notifications for future tray or
+menu-bar shells.
 
 ## Sync
 

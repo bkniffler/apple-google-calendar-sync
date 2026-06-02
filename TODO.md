@@ -177,7 +177,7 @@ border.
       state, and selection.
 - [x] Add provider display names, calendar names, and last sync state once
       discovery and sync-state repositories are wired into the TUI.
-- [ ] Add a dry-run report viewer with sortable/filterable action rows.
+- [x] Add a dry-run report viewer with sortable/filterable action rows.
 - [ ] Add a conflict workbench with grouped reasons, event detail comparison,
       selected resolution policy, and audit history.
 - [ ] Add a setup wizard screen that mirrors CLI setup but feels guided.
