@@ -216,7 +216,7 @@ border.
 - [ ] Investigate Windows tray implementation options.
 - [ ] Investigate Linux tray/AppIndicator practicality.
 - [x] Support notifications for failed syncs and unresolved conflicts.
-- [ ] Support safe quick actions: dry-run now, apply now, open conflicts, pause.
+- [x] Support safe quick actions: dry-run now, apply now, open conflicts, pause.
 
 ## 14. Packaging And Release
 

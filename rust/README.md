@@ -162,6 +162,8 @@ are kept consistent: neutral idle states, blue/cyan active states, green clean
 states, yellow warnings/conflicts, and red failures or destructive actions.
 Press `:` inside the TUI to open the command palette for dry-run, apply,
 conflict refresh, setup, view switching, report export, and quit actions. The
+same shell actions are exposed as safe quick actions, including immediate
+dry-run/apply, conflict inspection, and background pause/resume (`b`). The
 key dashboard, run history, conflict, notification, and command-palette screens
 have buffer-level render tests to catch layout regressions. The TUI drives
 commands through `insync-app` events/effects, and `insync-app` exposes a shell

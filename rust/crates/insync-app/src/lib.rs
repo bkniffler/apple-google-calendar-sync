@@ -12,6 +12,7 @@ pub struct AppModel {
     pub selected_run_id: Option<String>,
     pub selected_conflict_index: Option<usize>,
     pub run_filter: AppRunFilter,
+    pub background_paused: bool,
     pub conflict_count: usize,
     pub last_message: Option<String>,
     pub last_run_at: Option<String>,
@@ -57,6 +58,7 @@ pub struct AppShellSnapshot {
     pub status: AppStatus,
     pub view: AppView,
     pub selected_pair_id: Option<String>,
+    pub background_paused: bool,
     pub conflict_count: usize,
     pub enabled_pair_count: usize,
     pub total_pair_count: usize,
@@ -158,6 +160,7 @@ pub enum AppCommand {
     OpenSetup,
     ShowPairs,
     ShowRuns,
+    ToggleBackgroundPause,
     ExportReport,
     Quit,
 }
@@ -223,6 +226,7 @@ impl AppModel {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            background_paused: false,
             conflict_count: 0,
             last_message: None,
             last_run_at: None,
@@ -301,6 +305,7 @@ impl AppModel {
             status: self.status,
             view: self.view,
             selected_pair_id: self.selected_pair_id.clone(),
+            background_paused: self.background_paused,
             conflict_count: self.conflict_count,
             enabled_pair_count: self.enabled_pair_count(),
             total_pair_count: self.pairs.len(),
@@ -313,8 +318,8 @@ impl AppModel {
                 .iter()
                 .map(|command| AppShellAction {
                     command: *command,
-                    label: command.label().to_string(),
-                    description: command.description().to_string(),
+                    label: command.label_for(self).to_string(),
+                    description: command.description_for(self).to_string(),
                     enabled: command.is_enabled(self),
                     destructive: command.is_destructive(),
                 })
@@ -386,10 +391,12 @@ impl AppModel {
             }
             AppEvent::StartDaemon => {
                 self.status = AppStatus::Syncing;
+                self.background_paused = false;
                 vec![AppEffect::StartBackgroundScheduler]
             }
             AppEvent::StopDaemon => {
                 self.status = AppStatus::Idle;
+                self.background_paused = true;
                 vec![AppEffect::StopBackgroundScheduler]
             }
             AppEvent::OpenSetup => vec![AppEffect::ShowSetup],
@@ -562,6 +569,13 @@ impl AppModel {
             AppCommand::OpenSetup => self.update(AppEvent::OpenSetup),
             AppCommand::ShowPairs => self.update(AppEvent::ShowDashboard),
             AppCommand::ShowRuns => self.update(AppEvent::ShowRuns),
+            AppCommand::ToggleBackgroundPause => {
+                if self.background_paused {
+                    self.update(AppEvent::StartDaemon)
+                } else {
+                    self.update(AppEvent::StopDaemon)
+                }
+            }
             AppCommand::ExportReport => vec![AppEffect::ExportDryRunReport],
             AppCommand::Quit => vec![AppEffect::Quit],
         }
@@ -587,12 +601,18 @@ impl AppModel {
                 message: "No calendar pairs configured".to_string(),
             });
         }
+        if self.background_paused {
+            notifications.push(AppShellNotification {
+                severity: AppNotificationSeverity::Info,
+                message: "Background sync is paused".to_string(),
+            });
+        }
         notifications
     }
 }
 
 impl AppCommand {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::DryRun,
         Self::ApplyRun,
         Self::RefreshConflicts,
@@ -600,6 +620,7 @@ impl AppCommand {
         Self::OpenSetup,
         Self::ShowPairs,
         Self::ShowRuns,
+        Self::ToggleBackgroundPause,
         Self::ExportReport,
         Self::Quit,
     ];
@@ -617,8 +638,16 @@ impl AppCommand {
             Self::OpenSetup => "Open setup",
             Self::ShowPairs => "Show pairs",
             Self::ShowRuns => "Show sync runs",
+            Self::ToggleBackgroundPause => "Pause background",
             Self::ExportReport => "Export report",
             Self::Quit => "Quit",
+        }
+    }
+
+    pub fn label_for(self, model: &AppModel) -> &'static str {
+        match self {
+            Self::ToggleBackgroundPause if model.background_paused => "Resume background",
+            _ => self.label(),
         }
     }
 
@@ -631,8 +660,18 @@ impl AppCommand {
             Self::OpenSetup => "Start the guided configuration flow",
             Self::ShowPairs => "Return to the calendar-pair dashboard",
             Self::ShowRuns => "Open recent sync-run history",
+            Self::ToggleBackgroundPause => "Pause the background scheduler",
             Self::ExportReport => "Export the latest dry-run report",
             Self::Quit => "Close the terminal dashboard",
+        }
+    }
+
+    pub fn description_for(self, model: &AppModel) -> &'static str {
+        match self {
+            Self::ToggleBackgroundPause if model.background_paused => {
+                "Resume the background scheduler"
+            }
+            _ => self.description(),
         }
     }
 
@@ -644,6 +683,7 @@ impl AppCommand {
             | Self::OpenSetup
             | Self::ShowPairs
             | Self::ShowRuns
+            | Self::ToggleBackgroundPause
             | Self::ExportReport
             | Self::Quit => true,
         }
@@ -698,6 +738,7 @@ mod tests {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            background_paused: false,
             conflict_count: 0,
             last_message: None,
             last_run_at: None,
@@ -727,6 +768,7 @@ mod tests {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            background_paused: false,
             conflict_count: 0,
             last_message: None,
             last_run_at: None,
@@ -783,6 +825,7 @@ mod tests {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            background_paused: false,
             conflict_count: 0,
             last_message: None,
             last_run_at: None,
@@ -824,6 +867,7 @@ mod tests {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            background_paused: false,
             conflict_count: 0,
             last_message: None,
             last_run_at: None,
@@ -883,6 +927,7 @@ mod tests {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            background_paused: false,
             conflict_count: 0,
             last_message: None,
             last_run_at: None,
@@ -942,6 +987,7 @@ mod tests {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            background_paused: false,
             conflict_count: 0,
             last_message: None,
             last_run_at: None,
@@ -1017,6 +1063,7 @@ mod tests {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            background_paused: false,
             conflict_count: 0,
             last_message: None,
             last_run_at: None,
@@ -1049,6 +1096,45 @@ mod tests {
     }
 
     #[test]
+    fn background_pause_command_toggles_scheduler_and_shell_action() {
+        let mut model = AppModel::from_config(&ServiceConfig::default());
+
+        let action = model
+            .shell_snapshot()
+            .actions
+            .into_iter()
+            .find(|action| action.command == AppCommand::ToggleBackgroundPause)
+            .unwrap();
+        assert_eq!(action.label, "Pause background");
+        assert_eq!(action.description, "Pause the background scheduler");
+        assert!(action.enabled);
+
+        let effects = model.update(AppEvent::ExecuteCommand(AppCommand::ToggleBackgroundPause));
+        assert_eq!(effects, vec![AppEffect::StopBackgroundScheduler]);
+        assert!(model.background_paused);
+
+        let snapshot = model.shell_snapshot();
+        assert!(snapshot.background_paused);
+        let action = snapshot
+            .actions
+            .iter()
+            .find(|action| action.command == AppCommand::ToggleBackgroundPause)
+            .unwrap();
+        assert_eq!(action.label, "Resume background");
+        assert_eq!(action.description, "Resume the background scheduler");
+        assert!(
+            snapshot
+                .notifications
+                .iter()
+                .any(|notification| notification.message == "Background sync is paused")
+        );
+
+        let effects = model.update(AppEvent::ExecuteCommand(AppCommand::ToggleBackgroundPause));
+        assert_eq!(effects, vec![AppEffect::StartBackgroundScheduler]);
+        assert!(!model.background_paused);
+    }
+
+    #[test]
     fn shell_snapshot_exposes_actions_status_and_notifications() {
         let mut model = AppModel {
             status: AppStatus::Idle,
@@ -1059,6 +1145,7 @@ mod tests {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            background_paused: false,
             conflict_count: 2,
             last_message: Some("ready".to_string()),
             last_run_at: Some("2026-06-02 12:00:00".to_string()),

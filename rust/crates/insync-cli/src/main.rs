@@ -1245,6 +1245,7 @@ mod tests {
         assert!(output.contains("No calendar pairs configured."));
         assert!(output.contains("Run setup or press s"));
         assert!(output.contains(": palette"));
+        assert!(output.contains("b pause"));
         assert!(output.contains("No runs yet"));
         assert!(output.contains("Notifications"));
         assert!(output.contains("Info No calendar pairs configured"));
@@ -1295,6 +1296,7 @@ mod tests {
         assert!(output.contains("Command Palette"));
         assert!(output.contains("> Apply sync"));
         assert!(output.contains("Dry-run sync"));
+        assert!(output.contains("Pause background"));
         assert!(output.contains("Export report"));
         assert!(output.contains("enter run"));
         assert!(output.contains("esc close"));
@@ -1346,6 +1348,20 @@ mod tests {
         assert!(output.contains("q quit"));
     }
 
+    #[test]
+    fn tui_background_pause_state_renders_resume_action() {
+        let mut model = test_model();
+        model.background_paused = true;
+        model.command_palette_open = true;
+        model.selected_command_index = 7;
+
+        let output = render_tui_to_text(&model, 120, 34);
+
+        assert!(output.contains("b resume"));
+        assert!(output.contains("> Resume background"));
+        assert!(output.contains("Background sync is paused"));
+    }
+
     fn test_model() -> AppModel {
         AppModel {
             status: AppStatus::Idle,
@@ -1356,6 +1372,7 @@ mod tests {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            background_paused: false,
             conflict_count: 0,
             last_message: None,
             last_run_at: None,
@@ -2537,6 +2554,13 @@ fn run_tui(mut model: AppModel) -> Result<()> {
                             break Ok(());
                         }
                     }
+                    KeyCode::Char('b') => {
+                        let effects = model
+                            .update(AppEvent::ExecuteCommand(AppCommand::ToggleBackgroundPause));
+                        if apply_tui_effects(&mut model, effects) {
+                            break Ok(());
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -3490,7 +3514,7 @@ fn render_command_bar(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" dry-run   "),
+        Span::raw(" dry   "),
         Span::styled(
             "a",
             Style::default()
@@ -3504,7 +3528,7 @@ fn render_command_bar(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
                 .fg(color_warning())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" conflicts   "),
+        Span::raw(" refresh   "),
         Span::styled(
             "s",
             Style::default()
@@ -3534,6 +3558,17 @@ fn render_command_bar(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
         ),
         Span::raw(" pairs   "),
         Span::styled(
+            "b",
+            Style::default()
+                .fg(color_warning())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(if model.background_paused {
+            " resume   "
+        } else {
+            " pause   "
+        }),
+        Span::styled(
             ":",
             Style::default()
                 .fg(color_running())
@@ -3561,7 +3596,7 @@ fn render_command_bar(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
                 .fg(Color::Blue)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" select   "),
+        Span::raw(" move   "),
         Span::styled(
             "q",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
@@ -3763,6 +3798,7 @@ fn command_color(command: AppCommand) -> Color {
         AppCommand::OpenSetup => color_neutral(),
         AppCommand::ShowPairs => Color::White,
         AppCommand::ShowRuns => color_success(),
+        AppCommand::ToggleBackgroundPause => color_warning(),
         AppCommand::ExportReport => color_checking(),
         AppCommand::Quit => color_danger(),
     }
