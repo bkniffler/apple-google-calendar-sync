@@ -183,7 +183,7 @@ border.
 - [ ] Add a setup wizard screen that mirrors CLI setup but feels guided.
 - [x] Add a logs/sync-runs screen with severity filtering and run detail.
 - [x] Add keyboard-first navigation with visible but compact command hints.
-- [ ] Add command palette style actions for sync, dry-run, apply, setup,
+- [x] Add command palette style actions for sync, dry-run, apply, setup,
       conflicts, export report, and quit.
 - [x] Add careful color semantics:
       neutral for idle, blue/cyan for running, green for clean, amber for

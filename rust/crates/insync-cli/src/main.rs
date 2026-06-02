@@ -7,7 +7,8 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use insync_app::{
-    AppEvent, AppModel, AppPairRuntimeSnapshot, AppRun, AppRuntimeSnapshot, AppStatus, AppView,
+    AppCommand, AppEffect, AppEvent, AppModel, AppPairRuntimeSnapshot, AppRun, AppRuntimeSnapshot,
+    AppStatus, AppView,
 };
 use insync_config::{
     LOCAL_CONFIG_FILE, SecretStoreKind, SyncPairConfig, app_config_path,
@@ -46,7 +47,9 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Gauge, List, ListItem, Paragraph, Row, Table, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Clear, Gauge, List, ListItem, Paragraph, Row, Table, Wrap,
+    },
 };
 use serde::Deserialize;
 use std::{
@@ -2258,54 +2261,78 @@ fn run_tui(mut model: AppModel) -> Result<()> {
         if event::poll(Duration::from_millis(200))?
             && let Event::Key(key) = event::read()?
         {
-            match key.code {
-                KeyCode::Char('q') => break Ok(()),
-                KeyCode::Down | KeyCode::Char('j') => match model.view {
-                    AppView::Dashboard => model.select_next_pair(),
-                    AppView::Runs => {
-                        model.update(AppEvent::SelectNextRun);
+            if model.command_palette_open {
+                match key.code {
+                    KeyCode::Esc => {
+                        model.update(AppEvent::CloseCommandPalette);
                     }
-                },
-                KeyCode::Up | KeyCode::Char('k') => match model.view {
-                    AppView::Dashboard => model.select_previous_pair(),
-                    AppView::Runs => {
-                        model.update(AppEvent::SelectPreviousRun);
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        model.update(AppEvent::SelectNextCommand);
                     }
-                },
-                KeyCode::Esc | KeyCode::Char('p') => {
-                    model.update(AppEvent::ShowDashboard);
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        model.update(AppEvent::SelectPreviousCommand);
+                    }
+                    KeyCode::Enter => {
+                        let effects = model.update(AppEvent::ExecuteSelectedCommand);
+                        if apply_tui_effects(&mut model, effects) {
+                            break Ok(());
+                        }
+                    }
+                    _ => {}
                 }
-                KeyCode::Char('l') => {
-                    model.update(AppEvent::ShowRuns);
+            } else {
+                match key.code {
+                    KeyCode::Char('q') => break Ok(()),
+                    KeyCode::Char(':') => {
+                        model.update(AppEvent::OpenCommandPalette);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => match model.view {
+                        AppView::Dashboard => model.select_next_pair(),
+                        AppView::Runs => {
+                            model.update(AppEvent::SelectNextRun);
+                        }
+                    },
+                    KeyCode::Up | KeyCode::Char('k') => match model.view {
+                        AppView::Dashboard => model.select_previous_pair(),
+                        AppView::Runs => {
+                            model.update(AppEvent::SelectPreviousRun);
+                        }
+                    },
+                    KeyCode::Esc | KeyCode::Char('p') => {
+                        model.update(AppEvent::ShowDashboard);
+                    }
+                    KeyCode::Char('l') => {
+                        model.update(AppEvent::ShowRuns);
+                    }
+                    KeyCode::Char('f') if model.view == AppView::Runs => {
+                        model.update(AppEvent::CycleRunFilter);
+                    }
+                    KeyCode::Char('d') => {
+                        let effects = model.update(AppEvent::StartDryRun);
+                        if apply_tui_effects(&mut model, effects) {
+                            break Ok(());
+                        }
+                    }
+                    KeyCode::Char('a') => {
+                        let effects = model.update(AppEvent::StartApplyRun);
+                        if apply_tui_effects(&mut model, effects) {
+                            break Ok(());
+                        }
+                    }
+                    KeyCode::Char('r') => {
+                        let effects = model.update(AppEvent::RefreshConflicts);
+                        if apply_tui_effects(&mut model, effects) {
+                            break Ok(());
+                        }
+                    }
+                    KeyCode::Char('s') => {
+                        let effects = model.update(AppEvent::OpenSetup);
+                        if apply_tui_effects(&mut model, effects) {
+                            break Ok(());
+                        }
+                    }
+                    _ => {}
                 }
-                KeyCode::Char('f') if model.view == AppView::Runs => {
-                    model.update(AppEvent::CycleRunFilter);
-                }
-                KeyCode::Char('d') => {
-                    model.update(AppEvent::StartDryRun);
-                    model.update(AppEvent::EngineFinished {
-                        message: "dry-run requested".to_string(),
-                    });
-                }
-                KeyCode::Char('a') => {
-                    model.update(AppEvent::StartApplyRun);
-                    model.update(AppEvent::EngineFinished {
-                        message: "apply requested".to_string(),
-                    });
-                }
-                KeyCode::Char('r') => {
-                    model.update(AppEvent::RefreshConflicts);
-                    model.update(AppEvent::EngineFinished {
-                        message: "conflict refresh requested".to_string(),
-                    });
-                }
-                KeyCode::Char('s') => {
-                    model.update(AppEvent::OpenSetup);
-                    model.update(AppEvent::EngineFinished {
-                        message: "setup requested".to_string(),
-                    });
-                }
-                _ => {}
             }
         }
 
@@ -2319,6 +2346,51 @@ fn run_tui(mut model: AppModel) -> Result<()> {
     terminal.show_cursor()?;
 
     result
+}
+
+fn apply_tui_effects(model: &mut AppModel, effects: Vec<AppEffect>) -> bool {
+    for effect in effects {
+        match effect {
+            AppEffect::RunDrySync => {
+                model.update(AppEvent::EngineFinished {
+                    message: "dry-run requested".to_string(),
+                });
+            }
+            AppEffect::RunApplySync => {
+                model.update(AppEvent::EngineFinished {
+                    message: "apply requested".to_string(),
+                });
+            }
+            AppEffect::LoadConflicts => {
+                model.update(AppEvent::EngineFinished {
+                    message: "conflict refresh requested".to_string(),
+                });
+            }
+            AppEffect::ShowSetup => {
+                model.update(AppEvent::EngineFinished {
+                    message: "setup requested".to_string(),
+                });
+            }
+            AppEffect::ExportDryRunReport => {
+                model.update(AppEvent::EngineFinished {
+                    message: "report export requested".to_string(),
+                });
+            }
+            AppEffect::StartBackgroundScheduler => {
+                model.update(AppEvent::EngineFinished {
+                    message: "background scheduler start requested".to_string(),
+                });
+            }
+            AppEffect::StopBackgroundScheduler => {
+                model.update(AppEvent::EngineFinished {
+                    message: "background scheduler stop requested".to_string(),
+                });
+            }
+            AppEffect::Quit => return true,
+        }
+    }
+
+    false
 }
 
 fn draw_tui(frame: &mut Frame<'_>, model: &AppModel) {
@@ -2357,6 +2429,9 @@ fn draw_tui(frame: &mut Frame<'_>, model: &AppModel) {
         AppView::Runs => render_runs_screen(frame, vertical[2], model),
     }
     render_command_bar(frame, vertical[3], model);
+    if model.command_palette_open {
+        render_command_palette(frame, area, model);
+    }
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
@@ -2998,6 +3073,13 @@ fn render_command_bar(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" pairs   "),
+        Span::styled(
+            ":",
+            Style::default()
+                .fg(color_running())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" palette   "),
     ];
 
     if model.view == AppView::Runs {
@@ -3034,6 +3116,79 @@ fn render_command_bar(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
             .alignment(Alignment::Center),
         area,
     );
+}
+
+fn render_command_palette(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+    let area = centered_rect(72, 58, area);
+    frame.render_widget(Clear, area);
+
+    let commands = AppCommand::all()
+        .iter()
+        .enumerate()
+        .map(|(index, command)| command_palette_item(index, *command, model))
+        .collect::<Vec<_>>();
+
+    let help = Line::from(vec![
+        Span::styled(
+            "enter",
+            Style::default()
+                .fg(color_running())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" run   "),
+        Span::styled(
+            "j/k",
+            Style::default()
+                .fg(color_checking())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" move   "),
+        Span::styled(
+            "esc",
+            Style::default()
+                .fg(color_warning())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" close"),
+    ]);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(8), Constraint::Length(3)])
+        .split(area);
+    frame.render_widget(
+        List::new(commands).block(chrome_block("Command Palette")),
+        chunks[0],
+    );
+    frame.render_widget(
+        Paragraph::new(help)
+            .block(chrome_block("Action"))
+            .alignment(Alignment::Center),
+        chunks[1],
+    );
+}
+
+fn command_palette_item(index: usize, command: AppCommand, model: &AppModel) -> ListItem<'static> {
+    let selected = index == model.selected_command_index;
+    let marker = if selected { ">" } else { " " };
+    let style = if selected {
+        Style::default()
+            .fg(command_color(command))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    };
+
+    ListItem::new(Line::from(vec![
+        Span::styled(marker.to_string(), style),
+        Span::raw(" "),
+        Span::styled(compact_string(command.label(), 20), style),
+        Span::raw("  "),
+        Span::styled(
+            compact_string(command.description(), 56),
+            Style::default().fg(color_muted()),
+        ),
+    ]))
 }
 
 fn render_empty_state(
@@ -3130,6 +3285,19 @@ fn last_run_color(model: &AppModel) -> Color {
     }
 }
 
+fn command_color(command: AppCommand) -> Color {
+    match command {
+        AppCommand::DryRun => color_running(),
+        AppCommand::ApplyRun => color_danger(),
+        AppCommand::RefreshConflicts => color_warning(),
+        AppCommand::OpenSetup => color_neutral(),
+        AppCommand::ShowPairs => Color::White,
+        AppCommand::ShowRuns => color_success(),
+        AppCommand::ExportReport => color_checking(),
+        AppCommand::Quit => color_danger(),
+    }
+}
+
 fn color_neutral() -> Color {
     Color::Gray
 }
@@ -3156,6 +3324,26 @@ fn color_warning() -> Color {
 
 fn color_danger() -> Color {
     Color::Red
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1])[1]
 }
 
 fn last_run_label(model: &AppModel) -> String {

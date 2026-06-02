@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 pub struct AppModel {
     pub status: AppStatus,
     pub view: AppView,
+    pub command_palette_open: bool,
+    pub selected_command_index: usize,
     pub selected_pair_id: Option<String>,
     pub selected_run_id: Option<String>,
     pub run_filter: AppRunFilter,
@@ -84,6 +86,19 @@ pub enum AppRunFilter {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum AppCommand {
+    DryRun,
+    ApplyRun,
+    RefreshConflicts,
+    OpenSetup,
+    ShowPairs,
+    ShowRuns,
+    ExportReport,
+    Quit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AppStatus {
     Idle,
     Checking,
@@ -106,6 +121,11 @@ pub enum AppEvent {
     CycleRunFilter,
     SelectNextRun,
     SelectPreviousRun,
+    OpenCommandPalette,
+    CloseCommandPalette,
+    SelectNextCommand,
+    SelectPreviousCommand,
+    ExecuteSelectedCommand,
     EngineFinished { message: String },
     EngineFailed { message: String },
 }
@@ -119,6 +139,8 @@ pub enum AppEffect {
     StopBackgroundScheduler,
     LoadConflicts,
     ShowSetup,
+    ExportDryRunReport,
+    Quit,
 }
 
 impl AppModel {
@@ -126,6 +148,8 @@ impl AppModel {
         Self {
             status: AppStatus::Idle,
             view: AppView::Dashboard,
+            command_palette_open: false,
+            selected_command_index: 0,
             selected_pair_id: config.sync.pairs.first().map(|pair| pair.id.clone()),
             selected_run_id: None,
             run_filter: AppRunFilter::All,
@@ -176,6 +200,13 @@ impl AppModel {
     pub fn selected_run(&self) -> Option<&AppRun> {
         let selected_run_id = self.selected_run_id.as_deref()?;
         self.runs.iter().find(|run| run.id == selected_run_id)
+    }
+
+    pub fn selected_command(&self) -> AppCommand {
+        AppCommand::all()
+            .get(self.selected_command_index)
+            .copied()
+            .unwrap_or(AppCommand::DryRun)
     }
 
     pub fn apply_runtime_snapshot(&mut self, snapshot: AppRuntimeSnapshot) {
@@ -264,6 +295,26 @@ impl AppModel {
                 self.select_previous_run();
                 Vec::new()
             }
+            AppEvent::OpenCommandPalette => {
+                self.command_palette_open = true;
+                Vec::new()
+            }
+            AppEvent::CloseCommandPalette => {
+                self.command_palette_open = false;
+                Vec::new()
+            }
+            AppEvent::SelectNextCommand => {
+                self.select_command_by_offset(1);
+                Vec::new()
+            }
+            AppEvent::SelectPreviousCommand => {
+                self.select_command_by_offset(-1);
+                Vec::new()
+            }
+            AppEvent::ExecuteSelectedCommand => {
+                self.command_palette_open = false;
+                self.execute_command(self.selected_command())
+            }
             AppEvent::EngineFinished { message } => {
                 self.status = AppStatus::Idle;
                 self.last_message = Some(message);
@@ -327,6 +378,69 @@ impl AppModel {
             .map(|run| run.id.clone())
             .collect()
     }
+
+    fn select_command_by_offset(&mut self, offset: isize) {
+        let command_count = AppCommand::all().len();
+        let next =
+            (self.selected_command_index as isize + offset).rem_euclid(command_count as isize);
+        self.selected_command_index = next as usize;
+    }
+
+    fn execute_command(&mut self, command: AppCommand) -> Vec<AppEffect> {
+        match command {
+            AppCommand::DryRun => self.update(AppEvent::StartDryRun),
+            AppCommand::ApplyRun => self.update(AppEvent::StartApplyRun),
+            AppCommand::RefreshConflicts => self.update(AppEvent::RefreshConflicts),
+            AppCommand::OpenSetup => self.update(AppEvent::OpenSetup),
+            AppCommand::ShowPairs => self.update(AppEvent::ShowDashboard),
+            AppCommand::ShowRuns => self.update(AppEvent::ShowRuns),
+            AppCommand::ExportReport => vec![AppEffect::ExportDryRunReport],
+            AppCommand::Quit => vec![AppEffect::Quit],
+        }
+    }
+}
+
+impl AppCommand {
+    const ALL: [Self; 8] = [
+        Self::DryRun,
+        Self::ApplyRun,
+        Self::RefreshConflicts,
+        Self::OpenSetup,
+        Self::ShowPairs,
+        Self::ShowRuns,
+        Self::ExportReport,
+        Self::Quit,
+    ];
+
+    pub fn all() -> &'static [Self] {
+        &Self::ALL
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::DryRun => "Dry-run sync",
+            Self::ApplyRun => "Apply sync",
+            Self::RefreshConflicts => "Refresh conflicts",
+            Self::OpenSetup => "Open setup",
+            Self::ShowPairs => "Show pairs",
+            Self::ShowRuns => "Show sync runs",
+            Self::ExportReport => "Export report",
+            Self::Quit => "Quit",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::DryRun => "Plan provider changes without writing events",
+            Self::ApplyRun => "Execute writes using the current sync plan",
+            Self::RefreshConflicts => "Reload unresolved conflict state",
+            Self::OpenSetup => "Start the guided configuration flow",
+            Self::ShowPairs => "Return to the calendar-pair dashboard",
+            Self::ShowRuns => "Open recent sync-run history",
+            Self::ExportReport => "Export the latest dry-run report",
+            Self::Quit => "Close the terminal dashboard",
+        }
+    }
 }
 
 impl AppRunFilter {
@@ -367,6 +481,8 @@ mod tests {
         let mut model = AppModel {
             status: AppStatus::Idle,
             view: AppView::Dashboard,
+            command_palette_open: false,
+            selected_command_index: 0,
             selected_pair_id: None,
             selected_run_id: None,
             run_filter: AppRunFilter::All,
@@ -391,6 +507,8 @@ mod tests {
         let mut model = AppModel {
             status: AppStatus::Idle,
             view: AppView::Dashboard,
+            command_palette_open: false,
+            selected_command_index: 0,
             selected_pair_id: Some("a".to_string()),
             selected_run_id: None,
             run_filter: AppRunFilter::All,
@@ -442,6 +560,8 @@ mod tests {
         let mut model = AppModel {
             status: AppStatus::Idle,
             view: AppView::Dashboard,
+            command_palette_open: false,
+            selected_command_index: 0,
             selected_pair_id: None,
             selected_run_id: None,
             run_filter: AppRunFilter::All,
@@ -476,6 +596,8 @@ mod tests {
         let mut model = AppModel {
             status: AppStatus::Idle,
             view: AppView::Dashboard,
+            command_palette_open: false,
+            selected_command_index: 0,
             selected_pair_id: Some("a".to_string()),
             selected_run_id: None,
             run_filter: AppRunFilter::All,
@@ -528,6 +650,8 @@ mod tests {
         let mut model = AppModel {
             status: AppStatus::Idle,
             view: AppView::Dashboard,
+            command_palette_open: false,
+            selected_command_index: 0,
             selected_pair_id: None,
             selected_run_id: None,
             run_filter: AppRunFilter::All,
@@ -575,5 +699,44 @@ mod tests {
         model.update(AppEvent::CycleRunFilter);
         assert_eq!(model.run_filter, AppRunFilter::Completed);
         assert_eq!(model.selected_run_id.as_deref(), Some("completed"));
+    }
+
+    #[test]
+    fn command_palette_selects_and_executes_actions() {
+        let mut model = AppModel {
+            status: AppStatus::Idle,
+            view: AppView::Dashboard,
+            command_palette_open: false,
+            selected_command_index: 0,
+            selected_pair_id: None,
+            selected_run_id: None,
+            run_filter: AppRunFilter::All,
+            conflict_count: 0,
+            last_message: None,
+            last_run_at: None,
+            last_run_status: None,
+            next_run_at: None,
+            recent_error: None,
+            pairs: Vec::new(),
+            runs: Vec::new(),
+        };
+
+        model.update(AppEvent::OpenCommandPalette);
+        assert!(model.command_palette_open);
+        assert_eq!(model.selected_command(), AppCommand::DryRun);
+
+        model.update(AppEvent::SelectPreviousCommand);
+        assert_eq!(model.selected_command(), AppCommand::Quit);
+        let effects = model.update(AppEvent::ExecuteSelectedCommand);
+
+        assert!(!model.command_palette_open);
+        assert_eq!(effects, vec![AppEffect::Quit]);
+
+        model.update(AppEvent::OpenCommandPalette);
+        model.selected_command_index = 5;
+        let effects = model.update(AppEvent::ExecuteSelectedCommand);
+
+        assert_eq!(model.view, AppView::Runs);
+        assert_eq!(effects, Vec::<AppEffect>::new());
     }
 }

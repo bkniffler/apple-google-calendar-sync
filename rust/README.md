@@ -153,7 +153,9 @@ sync timestamps from SQLite, and a filterable recent-run history with selected
 run detail. Calendar names are populated after setup discovery or
 `insync db calendars` has cached provider metadata. Color semantics are kept
 consistent: neutral idle states, blue/cyan active states, green clean states,
-yellow warnings/conflicts, and red failures or destructive actions.
+yellow warnings/conflicts, and red failures or destructive actions. Press `:`
+inside the TUI to open the command palette for dry-run, apply, conflict refresh,
+setup, view switching, report export, and quit actions.
 
 ## Sync
 
