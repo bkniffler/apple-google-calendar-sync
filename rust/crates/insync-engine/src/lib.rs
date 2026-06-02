@@ -144,6 +144,10 @@ pub struct ReportRow {
     pub pair_id: String,
     pub action: String,
     pub canonical_uid: String,
+    pub google_event_id: String,
+    pub google_ical_uid: String,
+    pub icloud_href: String,
+    pub icloud_uid: String,
     pub reason: String,
     pub resolution: String,
     pub conflict_policy: String,
@@ -1272,6 +1276,10 @@ const REPORT_HEADERS: &[&str] = &[
     "pair_id",
     "action",
     "canonical_uid",
+    "google_event_id",
+    "google_ical_uid",
+    "icloud_href",
+    "icloud_uid",
     "reason",
     "resolution",
     "conflict_policy",
@@ -1298,11 +1306,16 @@ fn action_to_report_row(pair_id: &str, action: &PlannedAction) -> ReportRow {
     let google_hash = google.map(hash_canonical_event).unwrap_or_default();
     let icloud_hash = icloud.map(hash_canonical_event).unwrap_or_default();
     let (reason, resolution, conflict_policy) = report_resolution(action);
+    let link = action_link(action);
 
     ReportRow {
         pair_id: pair_id.to_string(),
         action: action_name(action).to_string(),
         canonical_uid: action_uid(action).to_string(),
+        google_event_id: google_event_id(google, link),
+        google_ical_uid: google_ical_uid(google, link),
+        icloud_href: icloud_href(icloud, link),
+        icloud_uid: icloud_uid(icloud, link),
         reason,
         resolution,
         conflict_policy,
@@ -1336,6 +1349,55 @@ fn action_to_report_row(pair_id: &str, action: &PlannedAction) -> ReportRow {
             .map(|(google, icloud)| diff_event_fields(google, icloud).join("|"))
             .unwrap_or_default(),
     }
+}
+
+fn action_link(action: &PlannedAction) -> Option<&insync_core::EventLink> {
+    match action {
+        PlannedAction::Snapshot { link, .. } | PlannedAction::Conflict { link, .. } => {
+            link.as_ref()
+        }
+        PlannedAction::CreateGoogle(action)
+        | PlannedAction::CreateIcloud(action)
+        | PlannedAction::UpdateGoogle(action)
+        | PlannedAction::UpdateIcloud(action)
+        | PlannedAction::DeleteGoogle(action)
+        | PlannedAction::DeleteIcloud(action) => action.link.as_ref(),
+        _ => None,
+    }
+}
+
+fn google_event_id(
+    google: Option<&CanonicalEvent>,
+    link: Option<&insync_core::EventLink>,
+) -> String {
+    google
+        .and_then(|event| event.provider_meta.event_id.clone())
+        .or_else(|| link.and_then(|link| link.google_event_id.clone()))
+        .unwrap_or_default()
+}
+
+fn google_ical_uid(
+    google: Option<&CanonicalEvent>,
+    link: Option<&insync_core::EventLink>,
+) -> String {
+    google
+        .and_then(|event| event.provider_meta.ical_uid.clone())
+        .or_else(|| link.and_then(|link| link.google_ical_uid.clone()))
+        .unwrap_or_default()
+}
+
+fn icloud_href(icloud: Option<&CanonicalEvent>, link: Option<&insync_core::EventLink>) -> String {
+    icloud
+        .and_then(|event| event.provider_meta.href.clone())
+        .or_else(|| link.and_then(|link| link.icloud_href.clone()))
+        .unwrap_or_default()
+}
+
+fn icloud_uid(icloud: Option<&CanonicalEvent>, link: Option<&insync_core::EventLink>) -> String {
+    icloud
+        .and_then(|event| event.provider_meta.ical_uid.clone())
+        .or_else(|| link.and_then(|link| link.icloud_uid.clone()))
+        .unwrap_or_default()
 }
 
 fn action_uid(action: &PlannedAction) -> &str {
@@ -1506,6 +1568,10 @@ fn report_row_to_csv(row: &ReportRow) -> String {
         &row.pair_id,
         &row.action,
         &row.canonical_uid,
+        &row.google_event_id,
+        &row.google_ical_uid,
+        &row.icloud_href,
+        &row.icloud_uid,
         &row.reason,
         &row.resolution,
         &row.conflict_policy,
@@ -1677,6 +1743,10 @@ mod tests {
         assert_eq!(summary.report_rows[0].pair_id, "personal");
         assert_eq!(summary.report_rows[0].action, "create_icloud");
         assert_eq!(summary.report_rows[0].canonical_uid, "uid-1");
+        assert_eq!(summary.report_rows[0].google_event_id, "uid-1");
+        assert_eq!(summary.report_rows[0].google_ical_uid, "uid-1");
+        assert_eq!(summary.report_rows[0].icloud_href, "");
+        assert_eq!(summary.report_rows[0].icloud_uid, "");
         assert_eq!(summary.report_rows[0].google_present, "yes");
         assert_eq!(summary.report_rows[0].icloud_present, "no");
 
@@ -1764,6 +1834,7 @@ mod tests {
         assert_eq!(json["actionCounts"]["create_icloud"], 1);
         assert_eq!(json["pairSummaries"][0]["pairId"], "personal");
         assert_eq!(json["reportRows"][0]["canonicalUid"], "uid-1");
+        assert_eq!(json["reportRows"][0]["googleEventId"], "uid-1");
 
         std::fs::remove_dir_all(&temp_dir).unwrap();
     }
@@ -1782,6 +1853,10 @@ mod tests {
                 pair_id: "personal".to_string(),
                 action: "create_icloud".to_string(),
                 canonical_uid: "uid-create".to_string(),
+                google_event_id: "google-create-id".to_string(),
+                google_ical_uid: "uid-create".to_string(),
+                icloud_href: String::new(),
+                icloud_uid: String::new(),
                 reason: String::new(),
                 resolution: String::new(),
                 conflict_policy: String::new(),
@@ -1804,6 +1879,10 @@ mod tests {
                 pair_id: "personal".to_string(),
                 action: "conflict".to_string(),
                 canonical_uid: "uid-conflict".to_string(),
+                google_event_id: "google-conflict-id".to_string(),
+                google_ical_uid: "uid-conflict".to_string(),
+                icloud_href: "https://caldav.example/cal/uid-conflict.ics".to_string(),
+                icloud_uid: "uid-conflict".to_string(),
                 reason: "both_sides_changed".to_string(),
                 resolution: "manual".to_string(),
                 conflict_policy: String::new(),

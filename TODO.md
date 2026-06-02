@@ -127,7 +127,7 @@ future interchangeable taskbar/menu-bar interface.
 ## 8. Dry-Run Reports
 
 - [x] Recreate CSV dry-run reports in Rust.
-- [ ] Include action, reason, resolution, conflict policy, pair ID, provider IDs,
+- [x] Include action, reason, resolution, conflict policy, pair ID, provider IDs,
       timestamps, and hashes where useful.
 - [x] Keep report rows on provider-backed dry-run plans and write CSV with the
       Bun-compatible column names.
