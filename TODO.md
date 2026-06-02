@@ -122,7 +122,7 @@ future interchangeable taskbar/menu-bar interface.
 - [x] Record scaffold sync runs and expose latest-run state for doctor/TUI.
 - [x] Resolve stale conflicts after successful apply runs.
 - [x] Add single-instance locking so two syncs cannot mutate the same DB.
-- [ ] Add structured sync summaries for CLI, TUI, reports, and future tray UI.
+- [x] Add structured sync summaries for CLI, TUI, reports, and future tray UI.
 
 ## 8. Dry-Run Reports
 

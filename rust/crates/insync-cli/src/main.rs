@@ -147,6 +147,8 @@ enum Command {
         report: Option<PathBuf>,
         #[arg(long, help = "Include no-op snapshots in the CSV report")]
         report_all: bool,
+        #[arg(long, help = "Write the structured sync summary as JSON")]
+        summary_json: Option<PathBuf>,
     },
     #[command(about = "Run sync repeatedly until Ctrl-C")]
     Daemon {
@@ -412,6 +414,7 @@ async fn main() -> Result<()> {
             fixtures,
             report,
             report_all,
+            summary_json,
         } => {
             let (config_path, config) = load_validated_config(config)?;
             let engine = SyncEngine::with_config_path(config.clone(), &config_path);
@@ -442,6 +445,10 @@ async fn main() -> Result<()> {
                         summary.report_rows.len(),
                         path.display()
                     );
+                }
+                if let Some(path) = summary_json.as_ref() {
+                    engine.write_sync_summary_json(path, &summary)?;
+                    println!("wrote sync summary to {}", path.display());
                 }
                 println!(
                     "planned Rust sync: db={}, configured_pairs={}, enabled_pairs={}, action_counts={:?}, resolution_counts={:?}, mode={:?}",
@@ -480,6 +487,10 @@ async fn main() -> Result<()> {
                         summary.report_rows.len(),
                         path.display()
                     );
+                }
+                if let Some(path) = summary_json.as_ref() {
+                    engine.write_sync_summary_json(path, &summary)?;
+                    println!("wrote sync summary to {}", path.display());
                 }
                 println!(
                     "planned live Rust sync: db={}, configured_pairs={}, enabled_pairs={}, action_counts={:?}, resolution_counts={:?}, mode={:?}",

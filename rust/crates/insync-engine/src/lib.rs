@@ -25,6 +25,7 @@ use insync_db::{
     },
 };
 use insync_providers::{CalendarProvider, ProviderChangeSet, ProviderError, ProviderSyncCursor};
+use serde::Serialize;
 use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},
@@ -74,19 +75,22 @@ pub enum EngineError {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RunMode {
     DryRun,
     Apply,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReportMode {
     ActionsOnly,
     AllActions,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DoctorSummary {
     pub db_path: PathBuf,
     pub configured_pair_count: usize,
@@ -97,7 +101,8 @@ pub struct DoctorSummary {
     pub latest_run: Option<SyncRunSummary>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SyncRunSummary {
     pub id: String,
     pub sync_pair_id: Option<String>,
@@ -107,7 +112,8 @@ pub struct SyncRunSummary {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SyncSummary {
     pub db_path: PathBuf,
     pub configured_pair_count: usize,
@@ -119,7 +125,8 @@ pub struct SyncSummary {
     pub mode: RunMode,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlannedSyncSummary {
     pub db_path: PathBuf,
     pub configured_pair_count: usize,
@@ -131,7 +138,8 @@ pub struct PlannedSyncSummary {
     pub mode: RunMode,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReportRow {
     pub pair_id: String,
     pub action: String,
@@ -155,7 +163,8 @@ pub struct ReportRow {
     pub diff_fields: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PairPlanSummary {
     pub pair_id: String,
     pub google_events: usize,
@@ -165,7 +174,8 @@ pub struct PairPlanSummary {
     pub resolution_counts: BTreeMap<String, usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StaleConflictCleanupSummary {
     pub db_path: PathBuf,
     pub resolved_count: usize,
@@ -528,6 +538,14 @@ impl SyncEngine {
         rows: &[ReportRow],
     ) -> Result<(), EngineError> {
         write_dry_run_report(path, rows)
+    }
+
+    pub fn write_sync_summary_json(
+        &self,
+        path: impl AsRef<Path>,
+        summary: &PlannedSyncSummary,
+    ) -> Result<(), EngineError> {
+        write_sync_summary_json(path, summary)
     }
 
     fn prepare_database(&self) -> Result<(PathBuf, rusqlite::Connection), EngineError> {
@@ -1224,6 +1242,32 @@ pub fn write_dry_run_report(path: impl AsRef<Path>, rows: &[ReportRow]) -> Resul
     Ok(())
 }
 
+pub fn write_sync_summary_json(
+    path: impl AsRef<Path>,
+    summary: &PlannedSyncSummary,
+) -> Result<(), EngineError> {
+    let path = path.as_ref();
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).map_err(|source| EngineError::ReportWrite {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+
+    let body =
+        serde_json::to_string_pretty(summary).map_err(|source| EngineError::ReportWrite {
+            path: path.to_path_buf(),
+            source: std::io::Error::other(source),
+        })?;
+    fs::write(path, format!("{body}\n")).map_err(|source| EngineError::ReportWrite {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(())
+}
+
 const REPORT_HEADERS: &[&str] = &[
     "pair_id",
     "action",
@@ -1676,6 +1720,50 @@ mod tests {
         assert!(body.starts_with("pair_id,action,canonical_uid"));
         assert!(body.contains("create_icloud"));
         assert!(body.contains("\"Planning, with comma\""));
+
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn writes_structured_sync_summary_json() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("insync-engine-summary-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let config_path = temp_dir.join("insync.json");
+        let config = config_with_db(".state/insync.db");
+        let engine = SyncEngine::with_config_path(config, &config_path);
+        let google = FakeProvider {
+            name: ProviderName::Google,
+            events: vec![event("uid-1", "Structured", ProviderName::Google)],
+        };
+        let icloud = FakeProvider {
+            name: ProviderName::Icloud,
+            events: Vec::new(),
+        };
+        let summary = engine
+            .plan_once_with_providers(
+                RunMode::DryRun,
+                SyncProviders {
+                    google: &google,
+                    icloud: &icloud,
+                },
+            )
+            .await
+            .unwrap();
+        let summary_path = temp_dir.join("reports/summary.json");
+
+        engine
+            .write_sync_summary_json(&summary_path, &summary)
+            .unwrap();
+        let body = std::fs::read_to_string(&summary_path).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(json["mode"], "dry_run");
+        assert_eq!(json["enabledPairCount"], 1);
+        assert_eq!(json["actionCounts"]["create_icloud"], 1);
+        assert_eq!(json["pairSummaries"][0]["pairId"], "personal");
+        assert_eq!(json["reportRows"][0]["canonicalUid"], "uid-1");
 
         std::fs::remove_dir_all(&temp_dir).unwrap();
     }

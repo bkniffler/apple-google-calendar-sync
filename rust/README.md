@@ -143,14 +143,15 @@ Use `--force` to replace an existing pair with the same ID. Directions are
 ```bash
 insync sync
 insync sync --report .insync/reports/dry-run.csv
+insync sync --summary-json .insync/reports/sync-summary.json
 insync sync --report-all --report .insync/reports/full-dry-run.csv
 insync sync --apply
 ```
 
 `insync sync` is a live dry-run by default: it fetches both providers, plans the
-work, updates no remote events, and can write a CSV report. `--apply` executes
-the planned provider writes, records event links and sync state in SQLite, and
-resolves stale manual conflicts after a successful run.
+work, updates no remote events, and can write CSV and JSON reports. `--apply`
+executes the planned provider writes, records event links and sync state in
+SQLite, and resolves stale manual conflicts after a successful run.
 
 For repeated background runs:
 
