@@ -466,6 +466,76 @@ mod tests {
     }
 
     #[test]
+    fn maps_full_google_fixture_to_canonical() {
+        let event = GoogleEvent {
+            id: Some("google-id-1".to_string()),
+            etag: Some("\"etag-1\"".to_string()),
+            i_cal_uid: Some("ical-uid-1".to_string()),
+            status: Some(GoogleEventStatus::Cancelled),
+            summary: Some("Private sync fixture".to_string()),
+            description: Some("Description".to_string()),
+            location: Some("Office".to_string()),
+            updated: Some("2026-06-01T10:15:00Z".to_string()),
+            visibility: Some(GoogleVisibility::Private),
+            start: Some(GoogleEventDateTime::DateTime {
+                date_time: "2026-06-01T09:00:00-04:00".to_string(),
+                time_zone: Some("America/New_York".to_string()),
+            }),
+            end: Some(GoogleEventDateTime::DateTime {
+                date_time: "2026-06-01T10:00:00-04:00".to_string(),
+                time_zone: Some("America/New_York".to_string()),
+            }),
+            recurrence: Some(vec![
+                "RRULE:FREQ=MONTHLY;COUNT=3".to_string(),
+                "EXDATE;TZID=America/New_York:20260608T090000".to_string(),
+            ]),
+            original_start_time: Some(GoogleEventDateTime::DateTime {
+                date_time: "2026-06-01T09:00:00-04:00".to_string(),
+                time_zone: Some("America/New_York".to_string()),
+            }),
+            sequence: Some(9),
+            attendees: Some(vec![GoogleAttendee {
+                email: Some("person@example.com".to_string()),
+                display_name: Some("Person".to_string()),
+                optional: Some(true),
+                response_status: Some("declined".to_string()),
+            }]),
+            reminders: Some(GoogleReminders {
+                use_default: Some(false),
+                overrides: Some(vec![GoogleReminder {
+                    method: Some("email".to_string()),
+                    minutes: Some(60),
+                }]),
+            }),
+            ..GoogleEvent::default()
+        };
+
+        let canonical = google_to_canonical("primary", event).unwrap();
+
+        assert_eq!(canonical.canonical_uid, "ical-uid-1");
+        assert_eq!(canonical.status, EventStatus::Cancelled);
+        assert_eq!(canonical.visibility, EventVisibility::Private);
+        assert!(canonical.provider_meta.deleted);
+        assert_eq!(canonical.attendees[0].email, "person@example.com");
+        assert_eq!(canonical.attendees[0].name.as_deref(), Some("Person"));
+        assert_eq!(
+            canonical.attendees[0].response_status.as_deref(),
+            Some("declined")
+        );
+        assert!(canonical.attendees[0].optional);
+        assert_eq!(canonical.reminders[0].method, "email");
+        assert_eq!(canonical.reminders[0].minutes_before_start, 60);
+        let recurrence = canonical.recurrence.as_ref().unwrap();
+        assert_eq!(recurrence.rrule.as_deref(), Some("FREQ=MONTHLY;COUNT=3"));
+        assert_eq!(recurrence.exdates, vec!["20260608T090000"]);
+        assert_eq!(
+            recurrence.recurrence_id.as_deref(),
+            Some("2026-06-01T09:00:00-04:00")
+        );
+        assert_eq!(recurrence.sequence, Some(9));
+    }
+
+    #[test]
     fn canonical_to_google_filters_invalid_attendees_and_sets_private_uid() {
         let event = CanonicalEvent {
             canonical_uid: "uid-1".to_string(),
@@ -522,7 +592,19 @@ mod tests {
         let google = canonical_to_google(&event, ProviderName::Icloud);
 
         assert_eq!(google.summary.as_deref(), Some("Planning"));
-        assert_eq!(google.attendees.unwrap().len(), 1);
+        assert_eq!(google.status, Some(GoogleEventStatus::Confirmed));
+        assert_eq!(google.visibility, Some(GoogleVisibility::Default));
+        assert_eq!(
+            google.start,
+            Some(GoogleEventDateTime::DateTime {
+                date_time: "2026-06-01T13:00:00+00:00".to_string(),
+                time_zone: Some("America/New_York".to_string())
+            })
+        );
+        let attendees = google.attendees.unwrap();
+        assert_eq!(attendees.len(), 1);
+        assert_eq!(attendees[0].email.as_deref(), Some("person@example.com"));
+        assert_eq!(attendees[0].response_status.as_deref(), Some("accepted"));
         assert_eq!(
             google
                 .extended_properties
@@ -539,6 +621,15 @@ mod tests {
                 "RRULE:FREQ=DAILY;COUNT=2".to_string(),
                 "EXDATE;VALUE=DATE:20260602".to_string()
             ]
+        );
+        let reminders = google.reminders.unwrap();
+        assert_eq!(reminders.use_default, Some(false));
+        assert_eq!(
+            reminders.overrides.unwrap()[0],
+            GoogleReminder {
+                method: Some("popup".to_string()),
+                minutes: Some(15)
+            }
         );
     }
 

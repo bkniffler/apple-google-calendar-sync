@@ -34,6 +34,9 @@ The first Rust target is therefore:
 5. Replace the TS runner with `insync-engine`.
 6. Build richer shells on top: `insync tui`, `insync daemon`, then tray/taskbar.
 
+Provider field preservation and known lossy mappings are documented in
+[`PROVIDER_MAPPING.md`](PROVIDER_MAPPING.md).
+
 ## Commands
 
 ```bash

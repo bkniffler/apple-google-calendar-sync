@@ -645,6 +645,94 @@ mod tests {
     }
 
     #[test]
+    fn round_trips_full_ical_fixture_where_supported() {
+        let mut event = timed_event();
+        event.canonical_uid = "fixture@example.com".to_string();
+        event.title = "Private recurring fixture".to_string();
+        event.status = EventStatus::Tentative;
+        event.visibility = EventVisibility::Private;
+        event.recurrence = Some(RecurrenceData {
+            rrule: Some("FREQ=WEEKLY;COUNT=3".to_string()),
+            exdates: vec!["20260608T130000Z".to_string()],
+            recurrence_id: Some("20260601T130000Z".to_string()),
+            sequence: Some(4),
+        });
+        event.attendees = vec![EventAttendee {
+            email: "person@example.com".to_string(),
+            name: Some("Person".to_string()),
+            response_status: Some("accepted".to_string()),
+            optional: true,
+        }];
+        event.reminders = vec![EventReminder {
+            method: "display".to_string(),
+            minutes_before_start: 30,
+        }];
+
+        let ics = canonical_to_ical(&event);
+        let parsed = ical_object_to_canonical(
+            "icloud-calendar",
+            CalendarObject {
+                url: "https://example.com/calendar/fixture.ics".to_string(),
+                etag: Some("etag".to_string()),
+                data: Some(ics),
+            },
+        )
+        .unwrap();
+        let parsed = &parsed[0];
+
+        assert_eq!(parsed.canonical_uid, "fixture@example.com");
+        assert_eq!(parsed.status, EventStatus::Tentative);
+        assert_eq!(parsed.visibility, EventVisibility::Private);
+        assert_eq!(parsed.attendees[0].email, "person@example.com");
+        assert_eq!(parsed.attendees[0].name.as_deref(), Some("Person"));
+        assert_eq!(
+            parsed.attendees[0].response_status.as_deref(),
+            Some("accepted")
+        );
+        assert!(parsed.attendees[0].optional);
+        assert_eq!(parsed.reminders[0].method, "display");
+        assert_eq!(parsed.reminders[0].minutes_before_start, 30);
+        let recurrence = parsed.recurrence.as_ref().unwrap();
+        assert_eq!(recurrence.rrule.as_deref(), Some("FREQ=WEEKLY;COUNT=3"));
+        assert_eq!(recurrence.exdates, vec!["20260608T130000Z"]);
+        assert_eq!(
+            recurrence.recurrence_id.as_deref(),
+            Some("20260601T130000Z")
+        );
+        assert_eq!(recurrence.sequence, Some(4));
+    }
+
+    #[test]
+    fn cancelled_ical_event_is_marked_deleted() {
+        let data = [
+            "BEGIN:VCALENDAR",
+            "VERSION:2.0",
+            "BEGIN:VEVENT",
+            "UID:cancelled@example.com",
+            "STATUS:CANCELLED",
+            "DTSTART:20260601T120000Z",
+            "DTEND:20260601T130000Z",
+            "SUMMARY:Cancelled",
+            "END:VEVENT",
+            "END:VCALENDAR",
+        ]
+        .join("\r\n");
+
+        let parsed = ical_object_to_canonical(
+            "icloud-calendar",
+            CalendarObject {
+                url: "https://example.com/calendar/cancelled.ics".to_string(),
+                etag: None,
+                data: Some(data),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(parsed[0].status, EventStatus::Cancelled);
+        assert!(parsed[0].provider_meta.deleted);
+    }
+
+    #[test]
     fn writes_timezone_local_date_times_without_utc_suffix() {
         let mut event = timed_event();
         event.canonical_uid = "berlin@example.com".to_string();

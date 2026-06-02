@@ -610,6 +610,79 @@ fn report_method() -> Method {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        io::{Read, Write},
+        net::{TcpListener, TcpStream},
+        thread,
+    };
+
+    #[tokio::test]
+    async fn list_calendars_uses_mock_caldav_fixture() {
+        let (base_url, handle) = start_mock_server(vec![
+            MockResponse {
+                expected_request: "PROPFIND /",
+                body: r#"
+                <d:multistatus xmlns:d="DAV:">
+                  <d:response>
+                    <d:href>/</d:href>
+                    <d:propstat>
+                      <d:prop>
+                        <d:current-user-principal><d:href>/principal/</d:href></d:current-user-principal>
+                      </d:prop>
+                    </d:propstat>
+                  </d:response>
+                </d:multistatus>
+                "#,
+            },
+            MockResponse {
+                expected_request: "PROPFIND /principal/",
+                body: r#"
+                <d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+                  <d:response>
+                    <d:href>/principal/</d:href>
+                    <d:propstat>
+                      <d:prop>
+                        <c:calendar-home-set><d:href>/calendars/user/</d:href></c:calendar-home-set>
+                      </d:prop>
+                    </d:propstat>
+                  </d:response>
+                </d:multistatus>
+                "#,
+            },
+            MockResponse {
+                expected_request: "PROPFIND /calendars/user/",
+                body: r#"
+                <d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+                  <d:response>
+                    <d:href>/calendars/user/home/</d:href>
+                    <d:propstat>
+                      <d:prop>
+                        <d:resourcetype><d:collection/><c:calendar/></d:resourcetype>
+                        <d:displayname>Home</d:displayname>
+                        <c:calendar-timezone>Europe/Berlin</c:calendar-timezone>
+                        <d:sync-token>sync-token-1</d:sync-token>
+                      </d:prop>
+                    </d:propstat>
+                  </d:response>
+                </d:multistatus>
+                "#,
+            },
+        ]);
+        let provider = IcloudCalDavProvider::new(IcloudProviderOptions {
+            username: Some("user@example.com".to_string()),
+            app_specific_password: Some("app-password".to_string()),
+            server_url: Some(base_url),
+        });
+
+        let calendars = provider.list_calendars().await.unwrap();
+        handle.join().unwrap();
+
+        assert_eq!(calendars.len(), 1);
+        assert_eq!(calendars[0].name, "Home");
+        assert!(calendars[0].id.ends_with("/calendars/user/home/"));
+        assert_eq!(calendars[0].timezone.as_deref(), Some("Europe/Berlin"));
+        assert!(calendars[0].writable);
+    }
 
     #[test]
     fn parses_calendar_discovery_multistatus() {
@@ -713,5 +786,46 @@ mod tests {
                 .as_str(),
             "https://caldav.example/calendars/user/home/"
         );
+    }
+
+    struct MockResponse {
+        expected_request: &'static str,
+        body: &'static str,
+    }
+
+    fn start_mock_server(responses: Vec<MockResponse>) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_http_request(&mut stream);
+                assert!(
+                    request.starts_with(response.expected_request),
+                    "expected request prefix {:?}, got {:?}",
+                    response.expected_request,
+                    request.lines().next()
+                );
+                write_xml_response(&mut stream, response.body);
+            }
+        });
+
+        (format!("http://{addr}"), handle)
+    }
+
+    fn read_http_request(stream: &mut TcpStream) -> String {
+        let mut buffer = [0; 4096];
+        let count = stream.read(&mut buffer).unwrap();
+        String::from_utf8_lossy(&buffer[..count]).into_owned()
+    }
+
+    fn write_xml_response(stream: &mut TcpStream, body: &str) {
+        write!(
+            stream,
+            "HTTP/1.1 207 Multi-Status\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
     }
 }

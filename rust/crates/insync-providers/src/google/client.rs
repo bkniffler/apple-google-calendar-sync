@@ -28,6 +28,8 @@ pub struct GoogleProviderOptions {
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub refresh_token: Option<String>,
+    pub api_base: Option<String>,
+    pub token_url: Option<String>,
 }
 
 #[derive(Debug)]
@@ -108,7 +110,7 @@ impl GoogleCalendarProvider {
         etag: Option<&str>,
     ) -> Result<T, ProviderError> {
         self.assert_configured()?;
-        let mut url = Url::parse(&format!("{GOOGLE_API_BASE}{path}"))
+        let mut url = Url::parse(&format!("{}{path}", self.api_base()))
             .map_err(|error| ProviderError::Request(error.to_string()))?;
         {
             let mut pairs = url.query_pairs_mut();
@@ -180,7 +182,7 @@ impl GoogleCalendarProvider {
         etag: Option<&str>,
     ) -> Result<(), ProviderError> {
         self.assert_configured()?;
-        let mut url = Url::parse(&format!("{GOOGLE_API_BASE}{path}"))
+        let mut url = Url::parse(&format!("{}{path}", self.api_base()))
             .map_err(|error| ProviderError::Request(error.to_string()))?;
         {
             let mut pairs = url.query_pairs_mut();
@@ -265,7 +267,7 @@ impl GoogleCalendarProvider {
         ];
         let response = self
             .client
-            .post(GOOGLE_TOKEN_URL)
+            .post(self.token_url())
             .form(&params)
             .send()
             .await
@@ -298,6 +300,17 @@ impl GoogleCalendarProvider {
             .map_err(|error| ProviderError::Request(error.to_string()))? = Some(cache);
 
         Ok(access_token)
+    }
+
+    fn api_base(&self) -> &str {
+        self.options.api_base.as_deref().unwrap_or(GOOGLE_API_BASE)
+    }
+
+    fn token_url(&self) -> &str {
+        self.options
+            .token_url
+            .as_deref()
+            .unwrap_or(GOOGLE_TOKEN_URL)
     }
 }
 
@@ -531,6 +544,11 @@ fn url_path(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        io::{Read, Write},
+        net::{TcpListener, TcpStream},
+        thread,
+    };
 
     #[test]
     fn auth_url_requests_offline_calendar_access() {
@@ -564,5 +582,76 @@ mod tests {
     fn encodes_path_segments() {
         assert_eq!(url_path("primary"), "primary");
         assert_eq!(url_path("a/b c"), "a%2Fb%20c");
+    }
+
+    #[tokio::test]
+    async fn list_calendars_uses_mock_google_http_fixture() {
+        let (base_url, handle) = start_mock_server(vec![
+            MockResponse {
+                expected_request: "POST /token",
+                body: r#"{"access_token":"access-token","expires_in":3600}"#,
+            },
+            MockResponse {
+                expected_request: "GET /calendar/v3/users/me/calendarList",
+                body: r#"{"items":[{"id":"primary","summary":"Primary","timeZone":"UTC","accessRole":"owner"}]}"#,
+            },
+        ]);
+        let provider = GoogleCalendarProvider::new(GoogleProviderOptions {
+            client_id: Some("client".to_string()),
+            client_secret: Some("secret".to_string()),
+            refresh_token: Some("refresh".to_string()),
+            api_base: Some(format!("{base_url}/calendar/v3")),
+            token_url: Some(format!("{base_url}/token")),
+        });
+
+        let calendars = provider.list_calendars().await.unwrap();
+        handle.join().unwrap();
+
+        assert_eq!(calendars.len(), 1);
+        assert_eq!(calendars[0].id, "primary");
+        assert_eq!(calendars[0].name, "Primary");
+        assert_eq!(calendars[0].timezone.as_deref(), Some("UTC"));
+        assert!(calendars[0].writable);
+    }
+
+    struct MockResponse {
+        expected_request: &'static str,
+        body: &'static str,
+    }
+
+    fn start_mock_server(responses: Vec<MockResponse>) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_http_request(&mut stream);
+                assert!(
+                    request.starts_with(response.expected_request),
+                    "expected request prefix {:?}, got {:?}",
+                    response.expected_request,
+                    request.lines().next()
+                );
+                write_json_response(&mut stream, response.body);
+            }
+        });
+
+        (format!("http://{addr}"), handle)
+    }
+
+    fn read_http_request(stream: &mut TcpStream) -> String {
+        let mut buffer = [0; 4096];
+        let count = stream.read(&mut buffer).unwrap();
+        String::from_utf8_lossy(&buffer[..count]).into_owned()
+    }
+
+    fn write_json_response(stream: &mut TcpStream, body: &str) {
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
     }
 }

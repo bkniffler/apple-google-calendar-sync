@@ -76,10 +76,10 @@ future interchangeable taskbar/menu-bar interface.
 - [x] Port iCalendar/CalDAV event to canonical event mapping.
 - [x] Port canonical event to iCalendar payload mapping.
 - [x] Port iCloud calendar metadata to provider calendar mapping.
-- [ ] Add fixture tests for all-day events, timed events, time zones,
+- [x] Add fixture tests for all-day events, timed events, time zones,
       recurrence, attendees, reminders, cancelled events, privacy, and status.
-- [ ] Add round-trip tests where provider limitations allow it.
-- [ ] Document provider fields that cannot safely round-trip.
+- [x] Add round-trip tests where provider limitations allow it.
+- [x] Document provider fields that cannot safely round-trip.
 
 ## 6. Provider Clients
 
@@ -94,7 +94,7 @@ future interchangeable taskbar/menu-bar interface.
       UID collisions, network failures, and mapping failures.
 - [x] Emit UID collision errors from iCloud cross-calendar collision probing.
 - [x] Add retry/backoff policy for transient provider errors.
-- [ ] Add provider integration tests that can run against fixtures/mocks by
+- [x] Add provider integration tests that can run against fixtures/mocks by
       default and real accounts only when explicitly enabled.
 
 ## 7. Sync Engine

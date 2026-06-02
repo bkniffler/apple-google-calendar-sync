@@ -1335,6 +1335,7 @@ fn live_providers(
             client_id: credentials.google.client_id,
             client_secret: credentials.google.client_secret,
             refresh_token: credentials.google.refresh_token,
+            ..GoogleProviderOptions::default()
         }),
         icloud: IcloudCalDavProvider::new(IcloudProviderOptions {
             username: credentials.icloud.username,
