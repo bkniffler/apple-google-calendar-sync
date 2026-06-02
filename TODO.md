@@ -222,9 +222,9 @@ border.
 
 - [x] Add `cargo install --path rust/crates/insync-cli` instructions.
 - [x] Add release builds for macOS, Linux, and Windows.
-- [ ] Decide binary name and package naming.
+- [x] Decide binary name and package naming.
 - [x] Add bundled/default config search order documentation.
-- [ ] Add migration docs from Bun to Rust.
+- [x] Add migration docs from Bun to Rust.
 - [x] Add GitHub Actions artifact builds.
 - [ ] Add signed/notarized macOS builds if we ship a menu-bar app.
 

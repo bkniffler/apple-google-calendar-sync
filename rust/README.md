@@ -65,6 +65,19 @@ The release-artifact workflow builds the `insync` CLI binary for Linux, macOS,
 and Windows on manual dispatch or `v*` tags. These are unsigned development
 artifacts until the final packaging path is decided.
 
+## Naming
+
+The user-facing binary name is `insync`. The Rust crate that owns that binary is
+`insync-cli`, so the workspace can keep separate library crates for the app
+model, engine, providers, database, config, and core planner without changing
+the command people run.
+
+Release archives and CI artifacts should use the binary name plus target label,
+for example `insync-macos-aarch64`, `insync-linux-x86_64`, and
+`insync-windows-x86_64.exe`. Future tray or menu-bar shells should use a
+separate package/app name, but should keep driving the same `insync-app`
+contract and `insync-engine` crates.
+
 ## Setup
 
 Create a starter config:
@@ -279,3 +292,62 @@ The CLI validates non-secret config shape before starting: version, database
 path, log level, account labels, CalDAV URL shape, poll interval, unique pair
 IDs, and non-empty calendar IDs. Credentials can still live inline or in the OS
 secret store.
+
+## Migrating From Bun
+
+The Rust config intentionally keeps the same JSON shape as the Bun service:
+`secretStore`, `dbPath`, provider account labels, credentials, conflict policy,
+and `sync.pairs`. In most cases you can start from the same
+`insync.local.json`.
+
+Recommended migration:
+
+1. Keep the Bun app installed and working until Rust dry-runs and reports match
+   your expectations.
+2. Back up your current SQLite state before the Rust binary touches it:
+
+   ```bash
+   cp .insync/insync.db .insync/insync.before-rust.db
+   ```
+
+3. Install the Rust binary:
+
+   ```bash
+   cd rust
+   cargo install --path crates/insync-cli
+   ```
+
+4. Run Rust doctor against the same config:
+
+   ```bash
+   insync --config ../insync.local.json doctor
+   ```
+
+5. Run a Rust dry-run and write reports:
+
+   ```bash
+   insync --config ../insync.local.json sync \
+     --report ../.insync/reports/rust-dry-run.csv \
+     --summary-json ../.insync/reports/rust-summary.json
+   ```
+
+6. Compare the Rust report/counts with the Bun dry-run report before enabling
+   `--apply`. Expect harmless ordering differences, but pair counts, conflict
+   counts, and actionable rows should make sense.
+
+7. Only after repeated clean dry-runs, test Rust apply on throwaway calendars
+   before pointing it at primary calendars:
+
+   ```bash
+   insync --config ../insync.local.json sync --apply
+   ```
+
+Notes:
+
+- `secretStore: "os"` is supported in both implementations, but the Rust binary
+  uses the Rust `keyring` crate. If secrets are still inline, Rust can move
+  them into the OS store on setup/credential writes.
+- Relative `dbPath` values are resolved relative to the config file location in
+  Rust. Keep this in mind if you pass a config outside the repository.
+- Do not run Bun watch mode and Rust daemon/apply mode against the same
+  calendars at the same time. Use one writer at a time.
