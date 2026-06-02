@@ -180,7 +180,7 @@ border.
 - [x] Add a dry-run report viewer with sortable/filterable action rows.
 - [x] Add a conflict workbench with grouped reasons, event detail comparison,
       selected resolution policy, and audit history.
-- [ ] Add a setup wizard screen that mirrors CLI setup but feels guided.
+- [x] Add a setup wizard screen that mirrors CLI setup but feels guided.
 - [x] Add a logs/sync-runs screen with severity filtering and run detail.
 - [x] Add keyboard-first navigation with visible but compact command hints.
 - [x] Add command palette style actions for sync, dry-run, apply, setup,

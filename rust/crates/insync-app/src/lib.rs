@@ -1,4 +1,4 @@
-use insync_config::ServiceConfig;
+use insync_config::{SecretStoreKind, ServiceConfig};
 use insync_core::SyncDirection;
 use serde::{Deserialize, Serialize};
 
@@ -12,6 +12,7 @@ pub struct AppModel {
     pub selected_run_id: Option<String>,
     pub selected_conflict_index: Option<usize>,
     pub run_filter: AppRunFilter,
+    pub setup: AppSetupState,
     pub report_filter: AppReportFilter,
     pub report_sort: AppReportSort,
     pub selected_report_index: Option<usize>,
@@ -42,6 +43,38 @@ pub struct AppPair {
     pub icloud_account_label: Option<String>,
     pub google_last_sync_at: Option<String>,
     pub icloud_last_sync_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppSetupState {
+    pub secret_store: String,
+    pub db_path: String,
+    pub log_level: String,
+    pub google_account_label: String,
+    pub google_client_id_configured: bool,
+    pub google_client_secret_inline: bool,
+    pub google_refresh_token_inline: bool,
+    pub icloud_account_label: String,
+    pub icloud_username_configured: bool,
+    pub icloud_app_password_inline: bool,
+    pub icloud_caldav_url: String,
+    pub poll_interval_seconds: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppSetupStep {
+    pub label: String,
+    pub status: AppSetupStepStatus,
+    pub detail: String,
+    pub next_action: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppSetupStepStatus {
+    Complete,
+    Attention,
+    Missing,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -165,6 +198,7 @@ pub struct AppConflictDetail {
 #[serde(rename_all = "snake_case")]
 pub enum AppView {
     Dashboard,
+    Setup,
     Runs,
     Reports,
     Conflicts,
@@ -233,6 +267,7 @@ pub enum AppEvent {
     RefreshConflicts,
     SelectPair(String),
     ShowDashboard,
+    ShowSetup,
     ShowRuns,
     ShowReports,
     ShowConflicts,
@@ -279,6 +314,7 @@ impl AppModel {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            setup: AppSetupState::from_config(config),
             report_filter: AppReportFilter::All,
             report_sort: AppReportSort::Pair,
             selected_report_index: None,
@@ -333,6 +369,17 @@ impl AppModel {
     pub fn selected_run(&self) -> Option<&AppRun> {
         let selected_run_id = self.selected_run_id.as_deref()?;
         self.runs.iter().find(|run| run.id == selected_run_id)
+    }
+
+    pub fn setup_steps(&self) -> Vec<AppSetupStep> {
+        self.setup.steps(self)
+    }
+
+    pub fn setup_ready_count(&self) -> usize {
+        self.setup_steps()
+            .iter()
+            .filter(|step| step.status == AppSetupStepStatus::Complete)
+            .count()
     }
 
     pub fn visible_report_rows(&self) -> Vec<&AppReportRow> {
@@ -481,7 +528,6 @@ impl AppModel {
                 self.background_paused = true;
                 vec![AppEffect::StopBackgroundScheduler]
             }
-            AppEvent::OpenSetup => vec![AppEffect::ShowSetup],
             AppEvent::RefreshConflicts => vec![AppEffect::LoadConflicts],
             AppEvent::SelectPair(pair_id) => {
                 self.selected_pair_id = Some(pair_id);
@@ -489,6 +535,10 @@ impl AppModel {
             }
             AppEvent::ShowDashboard => {
                 self.view = AppView::Dashboard;
+                Vec::new()
+            }
+            AppEvent::ShowSetup | AppEvent::OpenSetup => {
+                self.view = AppView::Setup;
                 Vec::new()
             }
             AppEvent::ShowRuns => {
@@ -699,7 +749,7 @@ impl AppModel {
             AppCommand::ApplyRun => self.update(AppEvent::StartApplyRun),
             AppCommand::RefreshConflicts => self.update(AppEvent::RefreshConflicts),
             AppCommand::ShowConflicts => self.update(AppEvent::ShowConflicts),
-            AppCommand::OpenSetup => self.update(AppEvent::OpenSetup),
+            AppCommand::OpenSetup => self.update(AppEvent::ShowSetup),
             AppCommand::ShowPairs => self.update(AppEvent::ShowDashboard),
             AppCommand::ShowRuns => self.update(AppEvent::ShowRuns),
             AppCommand::ShowReports => self.update(AppEvent::ShowReports),
@@ -745,6 +795,202 @@ impl AppModel {
     }
 }
 
+impl AppSetupState {
+    fn from_config(config: &ServiceConfig) -> Self {
+        Self {
+            secret_store: match config.secret_store {
+                SecretStoreKind::None => "none".to_string(),
+                SecretStoreKind::Os => "os".to_string(),
+            },
+            db_path: config.db_path.display().to_string(),
+            log_level: config.log_level.clone(),
+            google_account_label: config.google.account_label.clone(),
+            google_client_id_configured: config.google.client_id.as_deref().is_some_and(non_empty),
+            google_client_secret_inline: config
+                .google
+                .client_secret
+                .as_deref()
+                .is_some_and(non_empty),
+            google_refresh_token_inline: config
+                .google
+                .refresh_token
+                .as_deref()
+                .is_some_and(non_empty),
+            icloud_account_label: config.icloud.account_label.clone(),
+            icloud_username_configured: config.icloud.username.as_deref().is_some_and(non_empty),
+            icloud_app_password_inline: config
+                .icloud
+                .app_specific_password
+                .as_deref()
+                .is_some_and(non_empty),
+            icloud_caldav_url: config.icloud.caldav_url.clone(),
+            poll_interval_seconds: config.sync.poll_interval_seconds,
+        }
+    }
+
+    fn steps(&self, model: &AppModel) -> Vec<AppSetupStep> {
+        vec![
+            AppSetupStep {
+                label: "Config".to_string(),
+                status: AppSetupStepStatus::Complete,
+                detail: format!(
+                    "db {}, log {}, secrets {}",
+                    self.db_path, self.log_level, self.secret_store
+                ),
+                next_action: "Run insync doctor after changes".to_string(),
+            },
+            self.google_step(),
+            self.icloud_step(),
+            self.discovery_step(model),
+            self.pair_step(model),
+            self.doctor_step(model),
+        ]
+    }
+
+    fn google_step(&self) -> AppSetupStep {
+        let has_os_secret_hint = self.secret_store == "os";
+        let status = if self.google_client_id_configured
+            && (self.google_refresh_token_inline || has_os_secret_hint)
+        {
+            AppSetupStepStatus::Complete
+        } else if self.google_client_id_configured {
+            AppSetupStepStatus::Attention
+        } else {
+            AppSetupStepStatus::Missing
+        };
+        AppSetupStep {
+            label: "Google OAuth".to_string(),
+            status,
+            detail: format!(
+                "account {}, client id {}, refresh token {}",
+                self.google_account_label,
+                readiness(self.google_client_id_configured),
+                secret_readiness(self.google_refresh_token_inline, has_os_secret_hint)
+            ),
+            next_action: "Run insync setup --google-callback or --google-code".to_string(),
+        }
+    }
+
+    fn icloud_step(&self) -> AppSetupStep {
+        let has_os_secret_hint = self.secret_store == "os";
+        let status = if self.icloud_username_configured
+            && (self.icloud_app_password_inline || has_os_secret_hint)
+        {
+            AppSetupStepStatus::Complete
+        } else if self.icloud_username_configured {
+            AppSetupStepStatus::Attention
+        } else {
+            AppSetupStepStatus::Missing
+        };
+        AppSetupStep {
+            label: "iCloud".to_string(),
+            status,
+            detail: format!(
+                "account {}, username {}, password {}, CalDAV {}",
+                self.icloud_account_label,
+                readiness(self.icloud_username_configured),
+                secret_readiness(self.icloud_app_password_inline, has_os_secret_hint),
+                self.icloud_caldav_url
+            ),
+            next_action: "Run insync setup --icloud-username ... --icloud-app-password ..."
+                .to_string(),
+        }
+    }
+
+    fn discovery_step(&self, model: &AppModel) -> AppSetupStep {
+        let cached_pairs = model
+            .pairs
+            .iter()
+            .filter(|pair| {
+                pair.google_calendar_name.is_some() || pair.icloud_calendar_name.is_some()
+            })
+            .count();
+        let status = if cached_pairs == model.pairs.len() && !model.pairs.is_empty() {
+            AppSetupStepStatus::Complete
+        } else if !model.pairs.is_empty() {
+            AppSetupStepStatus::Attention
+        } else {
+            AppSetupStepStatus::Missing
+        };
+        AppSetupStep {
+            label: "Discovery".to_string(),
+            status,
+            detail: format!(
+                "{cached_pairs}/{} pairs have cached calendar metadata",
+                model.pairs.len()
+            ),
+            next_action: "Run insync setup --discover".to_string(),
+        }
+    }
+
+    fn pair_step(&self, model: &AppModel) -> AppSetupStep {
+        let status = if model.enabled_pair_count() > 0 {
+            AppSetupStepStatus::Complete
+        } else if model.pairs.is_empty() {
+            AppSetupStepStatus::Missing
+        } else {
+            AppSetupStepStatus::Attention
+        };
+        AppSetupStep {
+            label: "Calendar Pair".to_string(),
+            status,
+            detail: format!(
+                "{} configured, {} enabled",
+                model.pairs.len(),
+                model.enabled_pair_count()
+            ),
+            next_action:
+                "Run insync setup --pair-id ... --google-calendar-id ... --icloud-calendar-id ..."
+                    .to_string(),
+        }
+    }
+
+    fn doctor_step(&self, model: &AppModel) -> AppSetupStep {
+        let status = if model.recent_error.is_some() {
+            AppSetupStepStatus::Attention
+        } else if model.last_run_status.as_deref() == Some("completed") {
+            AppSetupStepStatus::Complete
+        } else {
+            AppSetupStepStatus::Missing
+        };
+        AppSetupStep {
+            label: "Doctor / Dry Run".to_string(),
+            status,
+            detail: model
+                .last_run_status
+                .as_ref()
+                .map(|status| format!("last run {status}"))
+                .unwrap_or_else(|| "no successful dry-run recorded in this session".to_string()),
+            next_action: "Run insync doctor, then insync sync --report .insync/reports/dry-run.csv"
+                .to_string(),
+        }
+    }
+}
+
+impl Default for AppSetupState {
+    fn default() -> Self {
+        Self::from_config(&ServiceConfig::default())
+    }
+}
+
+fn non_empty(value: &str) -> bool {
+    !value.trim().is_empty()
+}
+
+fn readiness(ready: bool) -> &'static str {
+    if ready { "ready" } else { "missing" }
+}
+
+fn secret_readiness(inline: bool, os_store: bool) -> &'static str {
+    if inline {
+        "inline"
+    } else if os_store {
+        "os store"
+    } else {
+        "missing"
+    }
+}
+
 impl AppCommand {
     const ALL: [Self; 11] = [
         Self::DryRun,
@@ -770,7 +1016,7 @@ impl AppCommand {
             Self::ApplyRun => "Apply sync",
             Self::RefreshConflicts => "Refresh conflicts",
             Self::ShowConflicts => "Show conflicts",
-            Self::OpenSetup => "Open setup",
+            Self::OpenSetup => "Setup wizard",
             Self::ShowPairs => "Show pairs",
             Self::ShowRuns => "Show sync runs",
             Self::ShowReports => "Show dry-run report",
@@ -793,7 +1039,7 @@ impl AppCommand {
             Self::ApplyRun => "Execute writes using the current sync plan",
             Self::RefreshConflicts => "Reload unresolved conflict state",
             Self::ShowConflicts => "Inspect unresolved conflict groups",
-            Self::OpenSetup => "Start the guided configuration flow",
+            Self::OpenSetup => "Open the guided setup checklist",
             Self::ShowPairs => "Return to the calendar-pair dashboard",
             Self::ShowRuns => "Open recent sync-run history",
             Self::ShowReports => "Open the latest dry-run report rows",
@@ -953,6 +1199,7 @@ mod tests {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            setup: AppSetupState::default(),
             report_filter: AppReportFilter::All,
             report_sort: AppReportSort::Pair,
             selected_report_index: None,
@@ -987,6 +1234,7 @@ mod tests {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            setup: AppSetupState::default(),
             report_filter: AppReportFilter::All,
             report_sort: AppReportSort::Pair,
             selected_report_index: None,
@@ -1048,6 +1296,7 @@ mod tests {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            setup: AppSetupState::default(),
             report_filter: AppReportFilter::All,
             report_sort: AppReportSort::Pair,
             selected_report_index: None,
@@ -1095,6 +1344,7 @@ mod tests {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            setup: AppSetupState::default(),
             report_filter: AppReportFilter::All,
             report_sort: AppReportSort::Pair,
             selected_report_index: None,
@@ -1160,6 +1410,7 @@ mod tests {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            setup: AppSetupState::default(),
             report_filter: AppReportFilter::All,
             report_sort: AppReportSort::Pair,
             selected_report_index: None,
@@ -1283,6 +1534,7 @@ mod tests {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            setup: AppSetupState::default(),
             report_filter: AppReportFilter::All,
             report_sort: AppReportSort::Pair,
             selected_report_index: None,
@@ -1385,6 +1637,7 @@ mod tests {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            setup: AppSetupState::default(),
             report_filter: AppReportFilter::All,
             report_sort: AppReportSort::Pair,
             selected_report_index: None,
@@ -1471,6 +1724,7 @@ mod tests {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            setup: AppSetupState::default(),
             report_filter: AppReportFilter::All,
             report_sort: AppReportSort::Pair,
             selected_report_index: None,
@@ -1542,6 +1796,40 @@ mod tests {
         assert_eq!(model.status, AppStatus::Idle);
 
         let effects = model.update(AppEvent::ExecuteCommand(AppCommand::OpenSetup));
-        assert_eq!(effects, vec![AppEffect::ShowSetup]);
+        assert_eq!(effects, Vec::<AppEffect>::new());
+        assert_eq!(model.view, AppView::Setup);
+    }
+
+    #[test]
+    fn setup_steps_surface_readiness_and_next_actions() {
+        let mut config = ServiceConfig::default();
+        config.secret_store = SecretStoreKind::Os;
+        config.google.client_id = Some("client-id".to_string());
+        config.icloud.username = Some("me@icloud.com".to_string());
+        config.sync.pairs = vec![insync_config::SyncPairConfig {
+            id: "personal".to_string(),
+            enabled: true,
+            direction: SyncDirection::TwoWay,
+            google_calendar_id: "primary".to_string(),
+            icloud_calendar_id: "https://caldav.example/cal".to_string(),
+        }];
+        let mut model = AppModel::from_config(&config);
+
+        let steps = model.setup_steps();
+        assert_eq!(steps.len(), 6);
+        assert_eq!(steps[0].status, AppSetupStepStatus::Complete);
+        assert_eq!(steps[1].status, AppSetupStepStatus::Complete);
+        assert_eq!(steps[2].status, AppSetupStepStatus::Complete);
+        assert_eq!(steps[3].status, AppSetupStepStatus::Attention);
+        assert_eq!(steps[4].status, AppSetupStepStatus::Complete);
+        assert_eq!(steps[5].status, AppSetupStepStatus::Missing);
+
+        model.pairs[0].google_calendar_name = Some("Primary".to_string());
+        model.pairs[0].icloud_calendar_name = Some("Home".to_string());
+        model.last_run_status = Some("completed".to_string());
+        let steps = model.setup_steps();
+        assert_eq!(steps[3].status, AppSetupStepStatus::Complete);
+        assert_eq!(steps[5].status, AppSetupStepStatus::Complete);
+        assert_eq!(model.setup_ready_count(), 6);
     }
 }

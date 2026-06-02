@@ -9,10 +9,10 @@ use crossterm::{
 use insync_app::{
     AppCommand, AppConflictDetail, AppConflictSummary, AppEffect, AppEvent, AppModel,
     AppNotificationSeverity, AppPairRuntimeSnapshot, AppReportRow, AppRun, AppRuntimeSnapshot,
-    AppShellAction, AppStatus, AppView,
+    AppSetupStep, AppSetupStepStatus, AppShellAction, AppStatus, AppView,
 };
 #[cfg(test)]
-use insync_app::{AppReportFilter, AppReportSort, AppRunFilter};
+use insync_app::{AppReportFilter, AppReportSort, AppRunFilter, AppSetupState};
 use insync_config::{
     LOCAL_CONFIG_FILE, SecretStoreKind, SyncPairConfig, app_config_path,
     credentials::{
@@ -1307,6 +1307,52 @@ mod tests {
     }
 
     #[test]
+    fn tui_setup_render_covers_guided_checklist_and_next_action() {
+        let mut model = test_model();
+        model.view = AppView::Setup;
+        model.setup = AppSetupState {
+            secret_store: "os".to_string(),
+            db_path: ".insync/insync.db".to_string(),
+            log_level: "info".to_string(),
+            google_account_label: "personal".to_string(),
+            google_client_id_configured: true,
+            google_client_secret_inline: false,
+            google_refresh_token_inline: false,
+            icloud_account_label: "personal".to_string(),
+            icloud_username_configured: true,
+            icloud_app_password_inline: false,
+            icloud_caldav_url: "https://caldav.icloud.com".to_string(),
+            poll_interval_seconds: 300,
+        };
+        model.pairs = vec![insync_app::AppPair {
+            id: "personal".to_string(),
+            enabled: true,
+            direction: insync_core::SyncDirection::TwoWay,
+            google_calendar_id: "primary".to_string(),
+            icloud_calendar_id: "https://caldav.example/cal".to_string(),
+            google_calendar_name: None,
+            icloud_calendar_name: None,
+            google_account_label: Some("me@gmail.com".to_string()),
+            icloud_account_label: Some("me@icloud.com".to_string()),
+            google_last_sync_at: None,
+            icloud_last_sync_at: None,
+        }];
+        model.selected_pair_id = Some("personal".to_string());
+
+        let output = render_tui_to_text(&model, 132, 36);
+
+        assert!(output.contains("Setup Wizard"));
+        assert!(output.contains("Ready Google OAuth"));
+        assert!(output.contains("Ready iCloud"));
+        assert!(output.contains("Check Discovery"));
+        assert!(output.contains("Next: Discovery"));
+        assert!(output.contains("Run insync setup --discover"));
+        assert!(output.contains("Selected Pair"));
+        assert!(output.contains("primary"));
+        assert!(output.contains("s set"));
+    }
+
+    #[test]
     fn tui_reports_render_filter_sort_rows_and_detail() {
         let mut model = test_model();
         model.view = AppView::Reports;
@@ -1477,6 +1523,7 @@ mod tests {
             selected_run_id: None,
             selected_conflict_index: None,
             run_filter: AppRunFilter::All,
+            setup: AppSetupState::default(),
             report_filter: AppReportFilter::All,
             report_sort: AppReportSort::Pair,
             selected_report_index: None,
@@ -2715,7 +2762,7 @@ fn run_tui(mut model: AppModel) -> Result<()> {
                         model.update(AppEvent::OpenCommandPalette);
                     }
                     KeyCode::Down | KeyCode::Char('j') => match model.view {
-                        AppView::Dashboard => model.select_next_pair(),
+                        AppView::Dashboard | AppView::Setup => model.select_next_pair(),
                         AppView::Runs => {
                             model.update(AppEvent::SelectNextRun);
                         }
@@ -2727,7 +2774,7 @@ fn run_tui(mut model: AppModel) -> Result<()> {
                         }
                     },
                     KeyCode::Up | KeyCode::Char('k') => match model.view {
-                        AppView::Dashboard => model.select_previous_pair(),
+                        AppView::Dashboard | AppView::Setup => model.select_previous_pair(),
                         AppView::Runs => {
                             model.update(AppEvent::SelectPreviousRun);
                         }
@@ -2898,6 +2945,7 @@ fn draw_tui(frame: &mut Frame<'_>, model: &AppModel) {
                 render_side_panel(frame, body[1], model);
             }
         }
+        AppView::Setup => render_setup_screen(frame, vertical[2], model),
         AppView::Runs => render_runs_screen(frame, vertical[2], model),
         AppView::Reports => render_reports_screen(frame, vertical[2], model),
         AppView::Conflicts => render_conflicts_screen(frame, vertical[2], model),
@@ -3336,6 +3384,163 @@ fn render_activity(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     ];
 
     frame.render_widget(List::new(items).block(chrome_block("Activity")), area);
+}
+
+fn render_setup_screen(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+    if area.width < 100 {
+        let body = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+            .split(area);
+        render_setup_steps(frame, body[0], model);
+        render_setup_guidance(frame, body[1], model);
+    } else {
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+            .split(area);
+        render_setup_steps(frame, body[0], model);
+        render_setup_guidance(frame, body[1], model);
+    }
+}
+
+fn render_setup_steps(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+    let steps = model.setup_steps();
+    let items = steps
+        .iter()
+        .map(|step| {
+            let label = setup_status_label(step.status);
+            let color = setup_status_color(step.status);
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{label} "),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    compact_string(&step.label, 20),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(compact_string(&step.detail, 82), Style::default().fg(color)),
+            ]))
+        })
+        .collect::<Vec<_>>();
+
+    let title = format!(
+        "Setup Wizard ({}/{})",
+        model.setup_ready_count(),
+        steps.len()
+    );
+    frame.render_widget(List::new(items).block(chrome_block(&title)), area);
+}
+
+fn render_setup_guidance(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+    let next_step = model
+        .setup_steps()
+        .into_iter()
+        .find(|step| step.status != AppSetupStepStatus::Complete);
+    let pair = model.selected_pair();
+    let mut lines = Vec::new();
+
+    if let Some(step) = next_step {
+        lines.extend(setup_step_lines("Next", &step, area.width));
+    } else {
+        lines.push(Line::from(vec![Span::styled(
+            "Ready for repeated dry-runs.",
+            Style::default()
+                .fg(color_success())
+                .add_modifier(Modifier::BOLD),
+        )]));
+        lines.push(Line::from(
+            "Run insync sync --report .insync/reports/dry-run.csv",
+        ));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![Span::styled(
+        "Selected Pair",
+        Style::default()
+            .fg(color_checking())
+            .add_modifier(Modifier::BOLD),
+    )]));
+    if let Some(pair) = pair {
+        lines.push(Line::from(format!(
+            "{} / {} / {}",
+            pair.id,
+            if pair.enabled { "enabled" } else { "disabled" },
+            direction_label(pair.direction)
+        )));
+        lines.push(Line::from(format!(
+            "Google: {}",
+            compact_detail_value(
+                &calendar_detail_label(
+                    pair.google_calendar_name.as_deref(),
+                    pair.google_account_label.as_deref(),
+                    &pair.google_calendar_id,
+                ),
+                area.width
+            )
+        )));
+        lines.push(Line::from(format!(
+            "iCloud: {}",
+            compact_detail_value(
+                &calendar_detail_label(
+                    pair.icloud_calendar_name.as_deref(),
+                    pair.icloud_account_label.as_deref(),
+                    &pair.icloud_calendar_id,
+                ),
+                area.width
+            )
+        )));
+    } else {
+        lines.push(Line::from("No pair selected."));
+        lines.push(Line::from("Use setup pair commands after discovery."));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(format!(
+        "Config: db {} / secrets {} / poll {}s",
+        compact_string(&model.setup.db_path, 26),
+        model.setup.secret_store,
+        model.setup.poll_interval_seconds
+    )));
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(chrome_block("Setup Guidance"))
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
+fn setup_step_lines(prefix: &str, step: &AppSetupStep, area_width: u16) -> Vec<Line<'static>> {
+    vec![
+        Line::from(vec![
+            Span::styled(
+                format!("{prefix}: "),
+                Style::default()
+                    .fg(setup_status_color(step.status))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                step.label.clone(),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(format!("Status: {}", setup_status_label(step.status))),
+        Line::from(format!(
+            "Detail: {}",
+            compact_detail_value(&step.detail, area_width)
+        )),
+        Line::from(format!(
+            "Action: {}",
+            compact_detail_value(&step.next_action, area_width)
+        )),
+    ]
 }
 
 fn render_notifications(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
@@ -4287,6 +4492,7 @@ fn status_color(status: AppStatus) -> Color {
 fn view_label(view: AppView) -> &'static str {
     match view {
         AppView::Dashboard => "pairs",
+        AppView::Setup => "setup",
         AppView::Runs => "runs",
         AppView::Reports => "reports",
         AppView::Conflicts => "conflicts",
@@ -4332,6 +4538,22 @@ fn command_color(command: AppCommand) -> Color {
         AppCommand::ToggleBackgroundPause => color_warning(),
         AppCommand::ExportReport => color_checking(),
         AppCommand::Quit => color_danger(),
+    }
+}
+
+fn setup_status_label(status: AppSetupStepStatus) -> &'static str {
+    match status {
+        AppSetupStepStatus::Complete => "Ready",
+        AppSetupStepStatus::Attention => "Check",
+        AppSetupStepStatus::Missing => "Todo",
+    }
+}
+
+fn setup_status_color(status: AppSetupStepStatus) -> Color {
+    match status {
+        AppSetupStepStatus::Complete => color_success(),
+        AppSetupStepStatus::Attention => color_warning(),
+        AppSetupStepStatus::Missing => color_danger(),
     }
 }
 
