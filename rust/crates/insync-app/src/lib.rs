@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppModel {
     pub status: AppStatus,
+    pub view: AppView,
     pub selected_pair_id: Option<String>,
+    pub selected_run_id: Option<String>,
+    pub run_filter: AppRunFilter,
     pub conflict_count: usize,
     pub last_message: Option<String>,
     pub last_run_at: Option<String>,
@@ -13,6 +16,7 @@ pub struct AppModel {
     pub next_run_at: Option<String>,
     pub recent_error: Option<String>,
     pub pairs: Vec<AppPair>,
+    pub runs: Vec<AppRun>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +42,7 @@ pub struct AppRuntimeSnapshot {
     pub next_run_at: Option<String>,
     pub recent_error: Option<String>,
     pub pairs: Vec<AppPairRuntimeSnapshot>,
+    pub runs: Vec<AppRun>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,6 +54,32 @@ pub struct AppPairRuntimeSnapshot {
     pub icloud_account_label: Option<String>,
     pub google_last_sync_at: Option<String>,
     pub icloud_last_sync_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppRun {
+    pub id: String,
+    pub pair_id: Option<String>,
+    pub status: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppView {
+    Dashboard,
+    Runs,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppRunFilter {
+    All,
+    Running,
+    Completed,
+    Failed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +101,11 @@ pub enum AppEvent {
     OpenSetup,
     RefreshConflicts,
     SelectPair(String),
+    ShowDashboard,
+    ShowRuns,
+    CycleRunFilter,
+    SelectNextRun,
+    SelectPreviousRun,
     EngineFinished { message: String },
     EngineFailed { message: String },
 }
@@ -89,7 +125,10 @@ impl AppModel {
     pub fn from_config(config: &ServiceConfig) -> Self {
         Self {
             status: AppStatus::Idle,
+            view: AppView::Dashboard,
             selected_pair_id: config.sync.pairs.first().map(|pair| pair.id.clone()),
+            selected_run_id: None,
+            run_filter: AppRunFilter::All,
             conflict_count: 0,
             last_message: None,
             last_run_at: None,
@@ -114,6 +153,7 @@ impl AppModel {
                     icloud_last_sync_at: None,
                 })
                 .collect(),
+            runs: Vec::new(),
         }
     }
 
@@ -124,6 +164,18 @@ impl AppModel {
 
     pub fn enabled_pair_count(&self) -> usize {
         self.pairs.iter().filter(|pair| pair.enabled).count()
+    }
+
+    pub fn visible_runs(&self) -> Vec<&AppRun> {
+        self.runs
+            .iter()
+            .filter(|run| self.run_filter.matches(&run.status))
+            .collect()
+    }
+
+    pub fn selected_run(&self) -> Option<&AppRun> {
+        let selected_run_id = self.selected_run_id.as_deref()?;
+        self.runs.iter().find(|run| run.id == selected_run_id)
     }
 
     pub fn apply_runtime_snapshot(&mut self, snapshot: AppRuntimeSnapshot) {
@@ -146,6 +198,8 @@ impl AppModel {
                 pair.icloud_last_sync_at = pair_snapshot.icloud_last_sync_at;
             }
         }
+        self.runs = snapshot.runs;
+        self.ensure_selected_run();
     }
 
     pub fn select_next_pair(&mut self) {
@@ -154,6 +208,14 @@ impl AppModel {
 
     pub fn select_previous_pair(&mut self) {
         self.select_pair_by_offset(-1);
+    }
+
+    pub fn select_next_run(&mut self) {
+        self.select_run_by_offset(1);
+    }
+
+    pub fn select_previous_run(&mut self) {
+        self.select_run_by_offset(-1);
     }
 
     pub fn update(&mut self, event: AppEvent) -> Vec<AppEffect> {
@@ -178,6 +240,28 @@ impl AppModel {
             AppEvent::RefreshConflicts => vec![AppEffect::LoadConflicts],
             AppEvent::SelectPair(pair_id) => {
                 self.selected_pair_id = Some(pair_id);
+                Vec::new()
+            }
+            AppEvent::ShowDashboard => {
+                self.view = AppView::Dashboard;
+                Vec::new()
+            }
+            AppEvent::ShowRuns => {
+                self.view = AppView::Runs;
+                self.ensure_selected_run();
+                Vec::new()
+            }
+            AppEvent::CycleRunFilter => {
+                self.run_filter = self.run_filter.next();
+                self.ensure_selected_run();
+                Vec::new()
+            }
+            AppEvent::SelectNextRun => {
+                self.select_next_run();
+                Vec::new()
+            }
+            AppEvent::SelectPreviousRun => {
+                self.select_previous_run();
                 Vec::new()
             }
             AppEvent::EngineFinished { message } => {
@@ -207,6 +291,71 @@ impl AppModel {
         let next = (current as isize + offset).rem_euclid(self.pairs.len() as isize) as usize;
         self.selected_pair_id = Some(self.pairs[next].id.clone());
     }
+
+    fn select_run_by_offset(&mut self, offset: isize) {
+        let visible_ids = self.visible_run_ids();
+        if visible_ids.is_empty() {
+            self.selected_run_id = None;
+            return;
+        }
+
+        let current = self
+            .selected_run_id
+            .as_ref()
+            .and_then(|selected| visible_ids.iter().position(|id| id == selected))
+            .unwrap_or(0);
+        let next = (current as isize + offset).rem_euclid(visible_ids.len() as isize) as usize;
+        self.selected_run_id = Some(visible_ids[next].clone());
+    }
+
+    fn ensure_selected_run(&mut self) {
+        let visible_ids = self.visible_run_ids();
+        let selected_is_visible = self
+            .selected_run_id
+            .as_ref()
+            .is_some_and(|selected| visible_ids.iter().any(|id| id == selected));
+        if selected_is_visible {
+            return;
+        }
+        self.selected_run_id = visible_ids.first().cloned();
+    }
+
+    fn visible_run_ids(&self) -> Vec<String> {
+        self.runs
+            .iter()
+            .filter(|run| self.run_filter.matches(&run.status))
+            .map(|run| run.id.clone())
+            .collect()
+    }
+}
+
+impl AppRunFilter {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn matches(self, status: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Running => status == "running",
+            Self::Completed => status == "completed",
+            Self::Failed => status == "failed",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::All => Self::Failed,
+            Self::Failed => Self::Running,
+            Self::Running => Self::Completed,
+            Self::Completed => Self::All,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -217,7 +366,10 @@ mod tests {
     fn dry_run_event_requests_sync_effect() {
         let mut model = AppModel {
             status: AppStatus::Idle,
+            view: AppView::Dashboard,
             selected_pair_id: None,
+            selected_run_id: None,
+            run_filter: AppRunFilter::All,
             conflict_count: 0,
             last_message: None,
             last_run_at: None,
@@ -225,6 +377,7 @@ mod tests {
             next_run_at: None,
             recent_error: None,
             pairs: Vec::new(),
+            runs: Vec::new(),
         };
 
         let effects = model.update(AppEvent::StartDryRun);
@@ -237,7 +390,10 @@ mod tests {
     fn pair_navigation_wraps() {
         let mut model = AppModel {
             status: AppStatus::Idle,
+            view: AppView::Dashboard,
             selected_pair_id: Some("a".to_string()),
+            selected_run_id: None,
+            run_filter: AppRunFilter::All,
             conflict_count: 0,
             last_message: None,
             last_run_at: None,
@@ -272,6 +428,7 @@ mod tests {
                     icloud_last_sync_at: None,
                 },
             ],
+            runs: Vec::new(),
         };
 
         model.select_previous_pair();
@@ -284,7 +441,10 @@ mod tests {
     fn runtime_snapshot_updates_dashboard_state() {
         let mut model = AppModel {
             status: AppStatus::Idle,
+            view: AppView::Dashboard,
             selected_pair_id: None,
+            selected_run_id: None,
+            run_filter: AppRunFilter::All,
             conflict_count: 0,
             last_message: None,
             last_run_at: None,
@@ -292,6 +452,7 @@ mod tests {
             next_run_at: None,
             recent_error: None,
             pairs: Vec::new(),
+            runs: Vec::new(),
         };
 
         model.apply_runtime_snapshot(AppRuntimeSnapshot {
@@ -301,6 +462,7 @@ mod tests {
             next_run_at: Some("2026-06-02 12:05:00".to_string()),
             recent_error: Some("auth failed".to_string()),
             pairs: Vec::new(),
+            runs: Vec::new(),
         });
 
         assert_eq!(model.conflict_count, 3);
@@ -313,7 +475,10 @@ mod tests {
     fn runtime_snapshot_updates_pair_metadata() {
         let mut model = AppModel {
             status: AppStatus::Idle,
+            view: AppView::Dashboard,
             selected_pair_id: Some("a".to_string()),
+            selected_run_id: None,
+            run_filter: AppRunFilter::All,
             conflict_count: 0,
             last_message: None,
             last_run_at: None,
@@ -333,6 +498,7 @@ mod tests {
                 google_last_sync_at: None,
                 icloud_last_sync_at: None,
             }],
+            runs: Vec::new(),
         };
 
         model.apply_runtime_snapshot(AppRuntimeSnapshot {
@@ -345,6 +511,7 @@ mod tests {
                 google_last_sync_at: Some("2026-06-02 12:00:00".to_string()),
                 icloud_last_sync_at: Some("2026-06-02 12:01:00".to_string()),
             }],
+            runs: Vec::new(),
             ..AppRuntimeSnapshot::default()
         });
 
@@ -354,5 +521,59 @@ mod tests {
             pair.icloud_last_sync_at.as_deref(),
             Some("2026-06-02 12:01:00")
         );
+    }
+
+    #[test]
+    fn run_view_filters_and_selects_runs() {
+        let mut model = AppModel {
+            status: AppStatus::Idle,
+            view: AppView::Dashboard,
+            selected_pair_id: None,
+            selected_run_id: None,
+            run_filter: AppRunFilter::All,
+            conflict_count: 0,
+            last_message: None,
+            last_run_at: None,
+            last_run_status: None,
+            next_run_at: None,
+            recent_error: None,
+            pairs: Vec::new(),
+            runs: Vec::new(),
+        };
+
+        model.apply_runtime_snapshot(AppRuntimeSnapshot {
+            runs: vec![
+                AppRun {
+                    id: "failed".to_string(),
+                    pair_id: Some("personal".to_string()),
+                    status: "failed".to_string(),
+                    started_at: "2026-06-02 12:00:00".to_string(),
+                    finished_at: Some("2026-06-02 12:01:00".to_string()),
+                    error: Some("auth failed".to_string()),
+                },
+                AppRun {
+                    id: "completed".to_string(),
+                    pair_id: Some("personal".to_string()),
+                    status: "completed".to_string(),
+                    started_at: "2026-06-02 11:00:00".to_string(),
+                    finished_at: Some("2026-06-02 11:01:00".to_string()),
+                    error: None,
+                },
+            ],
+            ..AppRuntimeSnapshot::default()
+        });
+
+        model.update(AppEvent::ShowRuns);
+        assert_eq!(model.view, AppView::Runs);
+        assert_eq!(model.selected_run_id.as_deref(), Some("failed"));
+
+        model.update(AppEvent::CycleRunFilter);
+        assert_eq!(model.run_filter, AppRunFilter::Failed);
+        assert_eq!(model.visible_runs().len(), 1);
+
+        model.update(AppEvent::CycleRunFilter);
+        model.update(AppEvent::CycleRunFilter);
+        assert_eq!(model.run_filter, AppRunFilter::Completed);
+        assert_eq!(model.selected_run_id.as_deref(), Some("completed"));
     }
 }

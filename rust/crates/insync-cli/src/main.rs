@@ -6,7 +6,9 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use insync_app::{AppEvent, AppModel, AppPairRuntimeSnapshot, AppRuntimeSnapshot, AppStatus};
+use insync_app::{
+    AppEvent, AppModel, AppPairRuntimeSnapshot, AppRun, AppRuntimeSnapshot, AppStatus, AppView,
+};
 use insync_config::{
     LOCAL_CONFIG_FILE, SecretStoreKind, SyncPairConfig, app_config_path,
     credentials::{
@@ -21,6 +23,7 @@ use insync_db::{
     repositories::{
         calendars::{CalendarRow, list_calendars},
         configured_pairs::{configured_calendar_ids, seed_configured_pairs},
+        sync_runs::{SyncRunStatus, recent_sync_runs},
     },
 };
 use insync_engine::{
@@ -1875,6 +1878,7 @@ fn runtime_snapshot_from_doctor(
             .as_ref()
             .and_then(|run| run.error.clone()),
         pairs: pair_runtime_snapshots(&summary.db_path, config)?,
+        runs: run_runtime_snapshots(&summary.db_path)?,
     })
 }
 
@@ -1924,6 +1928,30 @@ fn calendar_last_sync_at(calendar: Option<&CalendarRow>) -> Option<String> {
             .clone()
             .or_else(|| calendar.last_full_sync_at.clone())
     })
+}
+
+fn run_runtime_snapshots(db_path: &Path) -> Result<Vec<AppRun>> {
+    let conn = open(db_path)?;
+    migrate(&conn)?;
+    Ok(recent_sync_runs(&conn, 100)?
+        .into_iter()
+        .map(|run| AppRun {
+            id: run.id,
+            pair_id: run.sync_pair_id,
+            status: sync_run_status_label(run.status).to_string(),
+            started_at: run.started_at,
+            finished_at: run.finished_at,
+            error: run.error,
+        })
+        .collect())
+}
+
+fn sync_run_status_label(status: SyncRunStatus) -> &'static str {
+    match status {
+        SyncRunStatus::Running => "running",
+        SyncRunStatus::Completed => "completed",
+        SyncRunStatus::Failed => "failed",
+    }
 }
 
 fn next_run_at(summary: &DoctorSummary, poll_interval_seconds: u64) -> Option<String> {
@@ -2232,8 +2260,27 @@ fn run_tui(mut model: AppModel) -> Result<()> {
         {
             match key.code {
                 KeyCode::Char('q') => break Ok(()),
-                KeyCode::Down | KeyCode::Char('j') => model.select_next_pair(),
-                KeyCode::Up | KeyCode::Char('k') => model.select_previous_pair(),
+                KeyCode::Down | KeyCode::Char('j') => match model.view {
+                    AppView::Dashboard => model.select_next_pair(),
+                    AppView::Runs => {
+                        model.update(AppEvent::SelectNextRun);
+                    }
+                },
+                KeyCode::Up | KeyCode::Char('k') => match model.view {
+                    AppView::Dashboard => model.select_previous_pair(),
+                    AppView::Runs => {
+                        model.update(AppEvent::SelectPreviousRun);
+                    }
+                },
+                KeyCode::Esc | KeyCode::Char('p') => {
+                    model.update(AppEvent::ShowDashboard);
+                }
+                KeyCode::Char('l') => {
+                    model.update(AppEvent::ShowRuns);
+                }
+                KeyCode::Char('f') if model.view == AppView::Runs => {
+                    model.update(AppEvent::CycleRunFilter);
+                }
                 KeyCode::Char('d') => {
                     model.update(AppEvent::StartDryRun);
                     model.update(AppEvent::EngineFinished {
@@ -2289,22 +2336,27 @@ fn draw_tui(frame: &mut Frame<'_>, model: &AppModel) {
     render_header(frame, vertical[0], model);
     render_metrics(frame, vertical[1], model);
 
-    if area.width < 100 {
-        let body = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(5), Constraint::Min(7)])
-            .split(vertical[2]);
-        render_pair_table(frame, body[0], model);
-        render_side_panel(frame, body[1], model);
-    } else {
-        let body = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-            .split(vertical[2]);
-        render_pair_table(frame, body[0], model);
-        render_side_panel(frame, body[1], model);
+    match model.view {
+        AppView::Dashboard => {
+            if area.width < 100 {
+                let body = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(5), Constraint::Min(7)])
+                    .split(vertical[2]);
+                render_pair_table(frame, body[0], model);
+                render_side_panel(frame, body[1], model);
+            } else {
+                let body = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+                    .split(vertical[2]);
+                render_pair_table(frame, body[0], model);
+                render_side_panel(frame, body[1], model);
+            }
+        }
+        AppView::Runs => render_runs_screen(frame, vertical[2], model),
     }
-    render_command_bar(frame, vertical[3]);
+    render_command_bar(frame, vertical[3], model);
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
@@ -2322,6 +2374,22 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
         Span::styled(
             status_label(model.status),
             Style::default().fg(status_color(model.status)),
+        ),
+        Span::raw("  View "),
+        Span::styled(
+            view_label(model.view),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  Filter "),
+        Span::styled(
+            model.run_filter.label(),
+            Style::default().fg(if model.view == AppView::Runs {
+                Color::Yellow
+            } else {
+                Color::DarkGray
+            }),
         ),
         Span::raw("  Selected "),
         Span::styled(
@@ -2652,8 +2720,184 @@ fn render_activity(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     frame.render_widget(List::new(items).block(chrome_block("Activity")), area);
 }
 
-fn render_command_bar(frame: &mut Frame<'_>, area: Rect) {
-    let commands = Line::from(vec![
+fn render_runs_screen(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+    if area.width < 100 {
+        let body = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+            .split(area);
+        render_runs_table(frame, body[0], model);
+        render_run_detail(frame, body[1], model);
+    } else {
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(64), Constraint::Percentage(36)])
+            .split(area);
+        render_runs_table(frame, body[0], model);
+        render_run_detail(frame, body[1], model);
+    }
+}
+
+fn render_runs_table(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+    let visible_runs = model.visible_runs();
+    if visible_runs.is_empty() {
+        let message = if model.runs.is_empty() {
+            "No sync runs recorded yet."
+        } else {
+            "No sync runs match this filter."
+        };
+        frame.render_widget(
+            Paragraph::new(message)
+                .block(chrome_block("Sync Runs"))
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true }),
+            area,
+        );
+        return;
+    }
+
+    let compact = area.width < 88;
+    let rows = visible_runs.iter().map(|run| run_row(run, model, compact));
+    let table = if compact {
+        Table::new(
+            rows,
+            [
+                Constraint::Length(1),
+                Constraint::Length(10),
+                Constraint::Min(16),
+                Constraint::Length(18),
+            ],
+        )
+        .header(
+            Row::new(["", "Status", "Pair", "Started"]).style(
+                Style::default()
+                    .fg(Color::Gray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
+    } else {
+        Table::new(
+            rows,
+            [
+                Constraint::Length(1),
+                Constraint::Length(10),
+                Constraint::Length(18),
+                Constraint::Percentage(26),
+                Constraint::Percentage(26),
+                Constraint::Percentage(20),
+            ],
+        )
+        .header(
+            Row::new(["", "Status", "Pair", "Started", "Finished", "Error"]).style(
+                Style::default()
+                    .fg(Color::Gray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
+    };
+
+    let title = format!("Sync Runs ({}/{})", visible_runs.len(), model.runs.len());
+    frame.render_widget(table.block(chrome_block(&title)), area);
+}
+
+fn run_row(run: &AppRun, model: &AppModel, compact: bool) -> Row<'static> {
+    let selected = model.selected_run_id.as_deref() == Some(run.id.as_str());
+    let marker = if selected { ">" } else { " " };
+    let style = if selected {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(run_status_color(&run.status))
+    };
+    let error = run.error.as_deref().unwrap_or("-");
+    let cells = if compact {
+        vec![
+            marker.to_string(),
+            run.status.clone(),
+            run.pair_id.as_deref().unwrap_or("-").to_string(),
+            compact_string(&run.started_at, 18),
+        ]
+    } else {
+        vec![
+            marker.to_string(),
+            run.status.clone(),
+            run.pair_id.as_deref().unwrap_or("-").to_string(),
+            compact_string(&run.started_at, 26),
+            compact_string(run.finished_at.as_deref().unwrap_or("-"), 26),
+            compact_string(error, 34),
+        ]
+    };
+
+    Row::new(cells).style(style)
+}
+
+fn render_run_detail(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+    let lines = if let Some(run) = model.selected_run() {
+        if area.height < 9 {
+            vec![
+                Line::from(vec![Span::styled(
+                    &run.status,
+                    Style::default()
+                        .fg(run_status_color(&run.status))
+                        .add_modifier(Modifier::BOLD),
+                )]),
+                Line::from(format!(
+                    "Run: {}",
+                    compact_detail_value(&run.id, area.width)
+                )),
+                Line::from(format!("Pair: {}", run.pair_id.as_deref().unwrap_or("-"))),
+                Line::from(format!(
+                    "At: {} -> {}",
+                    compact_string(&run.started_at, 24),
+                    compact_string(run.finished_at.as_deref().unwrap_or("-"), 24)
+                )),
+                Line::from(format!(
+                    "Error: {}",
+                    compact_detail_value(run.error.as_deref().unwrap_or("-"), area.width)
+                )),
+            ]
+        } else {
+            vec![
+                Line::from(vec![Span::styled(
+                    &run.status,
+                    Style::default()
+                        .fg(run_status_color(&run.status))
+                        .add_modifier(Modifier::BOLD),
+                )]),
+                Line::from(format!(
+                    "Run ID: {}",
+                    compact_detail_value(&run.id, area.width)
+                )),
+                Line::from(format!("Pair: {}", run.pair_id.as_deref().unwrap_or("-"))),
+                Line::from(format!("Started: {}", run.started_at)),
+                Line::from(format!(
+                    "Finished: {}",
+                    run.finished_at.as_deref().unwrap_or("-")
+                )),
+                Line::from(format!(
+                    "Error: {}",
+                    compact_detail_value(run.error.as_deref().unwrap_or("-"), area.width)
+                )),
+            ]
+        }
+    } else {
+        vec![
+            Line::from("No run selected."),
+            Line::from("Use f to change the filter or run insync sync."),
+        ]
+    };
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(chrome_block("Run Detail"))
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
+fn render_command_bar(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+    let mut spans = vec![
         Span::styled(
             "d",
             Style::default()
@@ -2683,6 +2927,35 @@ fn render_command_bar(frame: &mut Frame<'_>, area: Rect) {
         ),
         Span::raw(" setup   "),
         Span::styled(
+            "l",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" runs   "),
+        Span::styled(
+            "p",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" pairs   "),
+    ];
+
+    if model.view == AppView::Runs {
+        spans.extend([
+            Span::styled(
+                "f",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" filter   "),
+        ]);
+    }
+
+    spans.extend([
+        Span::styled(
             "j/k",
             Style::default()
                 .fg(Color::Blue)
@@ -2695,6 +2968,7 @@ fn render_command_bar(frame: &mut Frame<'_>, area: Rect) {
         ),
         Span::raw(" quit"),
     ]);
+    let commands = Line::from(spans);
 
     frame.render_widget(
         Paragraph::new(commands)
@@ -2727,6 +3001,22 @@ fn status_color(status: AppStatus) -> Color {
         AppStatus::Checking => Color::Blue,
         AppStatus::Syncing => Color::Cyan,
         AppStatus::Error => Color::Red,
+    }
+}
+
+fn view_label(view: AppView) -> &'static str {
+    match view {
+        AppView::Dashboard => "pairs",
+        AppView::Runs => "runs",
+    }
+}
+
+fn run_status_color(status: &str) -> Color {
+    match status {
+        "failed" => Color::Red,
+        "completed" => Color::Green,
+        "running" => Color::Cyan,
+        _ => Color::Gray,
     }
 }
 

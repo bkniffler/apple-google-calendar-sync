@@ -181,7 +181,7 @@ border.
 - [ ] Add a conflict workbench with grouped reasons, event detail comparison,
       selected resolution policy, and audit history.
 - [ ] Add a setup wizard screen that mirrors CLI setup but feels guided.
-- [ ] Add a logs/sync-runs screen with severity filtering and run detail.
+- [x] Add a logs/sync-runs screen with severity filtering and run detail.
 - [x] Add keyboard-first navigation with visible but compact command hints.
 - [ ] Add command palette style actions for sync, dry-run, apply, setup,
       conflicts, export report, and quit.
