@@ -5,6 +5,7 @@ use insync_core::{
     ConflictPolicies, ConflictPolicy, DeleteConflictPolicy, SyncDirection, UidCollisionPolicy,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{
     collections::BTreeSet,
     env,
@@ -17,6 +18,7 @@ use thiserror::Error;
 pub const INSYNC_CONFIG_ENV: &str = "INSYNC_CONFIG";
 pub const LOCAL_CONFIG_FILE: &str = "insync.local.json";
 pub const APP_CONFIG_FILE: &str = "insync.json";
+pub const CURRENT_CONFIG_VERSION: u32 = 1;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -32,6 +34,8 @@ pub enum ConfigError {
         path: PathBuf,
         source: serde_json::Error,
     },
+    #[error("unsupported config version {version}; this binary supports up to {current_version}")]
+    UnsupportedVersion { version: u32, current_version: u32 },
     #[error("failed to serialize config: {0}")]
     Serialize(#[from] serde_json::Error),
     #[error("failed to write config {path}: {source}")]
@@ -242,7 +246,12 @@ pub fn load_config(path: impl AsRef<Path>) -> Result<ServiceConfig, ConfigError>
         path: path.to_path_buf(),
         source,
     })?;
-    serde_json::from_str(&body).map_err(|source| ConfigError::Parse {
+    let mut value = serde_json::from_str::<Value>(&body).map_err(|source| ConfigError::Parse {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    migrate_config_value(&mut value)?;
+    serde_json::from_value(value).map_err(|source| ConfigError::Parse {
         path: path.to_path_buf(),
         source,
     })
@@ -372,7 +381,42 @@ fn resolve_config_path_from(
 }
 
 fn default_version() -> u32 {
-    1
+    CURRENT_CONFIG_VERSION
+}
+
+fn migrate_config_value(value: &mut Value) -> Result<(), ConfigError> {
+    let version = config_version(value).unwrap_or(CURRENT_CONFIG_VERSION);
+    if version > CURRENT_CONFIG_VERSION {
+        return Err(ConfigError::UnsupportedVersion {
+            version,
+            current_version: CURRENT_CONFIG_VERSION,
+        });
+    }
+
+    if version == 0 {
+        migrate_config_v0_to_v1(value);
+    } else {
+        set_config_version(value, CURRENT_CONFIG_VERSION);
+    }
+
+    Ok(())
+}
+
+fn migrate_config_v0_to_v1(value: &mut Value) {
+    set_config_version(value, CURRENT_CONFIG_VERSION);
+}
+
+fn config_version(value: &Value) -> Option<u32> {
+    value
+        .get("version")
+        .and_then(Value::as_u64)
+        .and_then(|version| u32::try_from(version).ok())
+}
+
+fn set_config_version(value: &mut Value, version: u32) {
+    if let Value::Object(map) = value {
+        map.insert("version".to_string(), Value::from(version));
+    }
 }
 
 fn default_db_path() -> PathBuf {
@@ -454,6 +498,77 @@ mod tests {
 
         assert_eq!(roundtrip.version, 1);
         assert_eq!(roundtrip.google.account_label, "personal");
+    }
+
+    #[test]
+    fn load_config_migrates_v0_to_current_version() {
+        let path = temp_config_path("migrate-v0");
+        std::fs::write(
+            &path,
+            r#"{
+              "version": 0,
+              "google": { "accountLabel": "personal" },
+              "icloud": { "accountLabel": "personal" },
+              "sync": {
+                "pairs": [{
+                  "id": "personal",
+                  "googleCalendarId": "primary",
+                  "icloudCalendarId": "https://caldav.icloud.com/cal"
+                }]
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let config = load_config(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(config.version, CURRENT_CONFIG_VERSION);
+        assert_eq!(config.sync.pairs[0].id, "personal");
+        validate_config(&config).unwrap();
+    }
+
+    #[test]
+    fn load_config_normalizes_missing_legacy_version() {
+        let path = temp_config_path("missing-version");
+        std::fs::write(
+            &path,
+            r#"{
+              "google": { "accountLabel": "personal" },
+              "icloud": { "accountLabel": "personal" }
+            }"#,
+        )
+        .unwrap();
+
+        let config = load_config(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(config.version, CURRENT_CONFIG_VERSION);
+    }
+
+    #[test]
+    fn load_config_rejects_future_versions_before_validation() {
+        let path = temp_config_path("future-version");
+        std::fs::write(
+            &path,
+            r#"{
+              "version": 999,
+              "google": { "accountLabel": "personal" },
+              "icloud": { "accountLabel": "personal" }
+            }"#,
+        )
+        .unwrap();
+
+        let error = load_config(&path).unwrap_err();
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(matches!(
+            error,
+            ConfigError::UnsupportedVersion {
+                version: 999,
+                current_version: CURRENT_CONFIG_VERSION
+            }
+        ));
     }
 
     #[test]
@@ -561,5 +676,9 @@ mod tests {
 
         assert_eq!(paths.first().unwrap(), &PathBuf::from(LOCAL_CONFIG_FILE));
         assert_eq!(paths.last().unwrap().file_name().unwrap(), APP_CONFIG_FILE);
+    }
+
+    fn temp_config_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("insync-config-{}-{label}.json", std::process::id()))
     }
 }

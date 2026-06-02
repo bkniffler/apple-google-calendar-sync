@@ -66,7 +66,7 @@ future interchangeable taskbar/menu-bar interface.
 - [x] Integrate OS keychain/credential storage for Google and iCloud secrets.
 - [x] Move inline secrets into the OS secret store when configured.
 - [x] Add non-secret config validation with clear diagnostics.
-- [ ] Add config migration tests for future schema versions.
+- [x] Add config migration tests for future schema versions.
 
 ## 5. Provider Mapping
 

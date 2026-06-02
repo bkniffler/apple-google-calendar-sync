@@ -79,6 +79,10 @@ insync --config /path/to/insync.json setup
 By default setup writes `insync.local.json` and uses `"secretStore": "os"` so
 future credentials go to the OS secret store.
 
+Config loading normalizes legacy/missing versions to the current schema version
+and rejects future schema versions before validation so old binaries fail
+clearly.
+
 `--interactive` prompts for Google and iCloud credentials, can run the Google
 OAuth callback, can discover calendars, can write a pair, and finishes with a
 doctor summary plus the next safe dry-run command.
