@@ -1107,6 +1107,18 @@ mod tests {
                 AppNotificationSeverity::Info
             ]
         );
+        assert_eq!(
+            snapshot
+                .notifications
+                .iter()
+                .map(|notification| notification.message.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "auth failed",
+                "2 unresolved conflict(s)",
+                "No calendar pairs configured"
+            ]
+        );
 
         let effects = model.update(AppEvent::ExecuteCommand(AppCommand::DryRun));
         assert!(effects.is_empty());

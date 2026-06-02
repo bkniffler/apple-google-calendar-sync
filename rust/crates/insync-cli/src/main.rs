@@ -8,8 +8,8 @@ use crossterm::{
 };
 use insync_app::{
     AppCommand, AppConflictDetail, AppConflictSummary, AppEffect, AppEvent, AppModel,
-    AppPairRuntimeSnapshot, AppRun, AppRunFilter, AppRuntimeSnapshot, AppShellAction, AppStatus,
-    AppView,
+    AppNotificationSeverity, AppPairRuntimeSnapshot, AppRun, AppRunFilter, AppRuntimeSnapshot,
+    AppShellAction, AppStatus, AppView,
 };
 use insync_config::{
     LOCAL_CONFIG_FILE, SecretStoreKind, SyncPairConfig, app_config_path,
@@ -1246,6 +1246,8 @@ mod tests {
         assert!(output.contains("Run setup or press s"));
         assert!(output.contains(": palette"));
         assert!(output.contains("No runs yet"));
+        assert!(output.contains("Notifications"));
+        assert!(output.contains("Info No calendar pairs configured"));
     }
 
     #[test]
@@ -1327,6 +1329,21 @@ mod tests {
         assert!(output.contains("Conflict Detail (2)"));
         assert!(output.contains("uid-1"));
         assert!(output.contains("c conflicts"));
+    }
+
+    #[test]
+    fn tui_notifications_render_failed_sync_and_conflicts() {
+        let mut model = test_model();
+        model.conflict_count = 2;
+        model.recent_error = Some("auth failed while refreshing Google".to_string());
+
+        let output = render_tui_to_text(&model, 120, 34);
+
+        assert!(output.contains("Notifications"));
+        assert!(output.contains("Error auth failed while refreshing Google"));
+        assert!(output.contains("Warning 2 unresolved conflict(s)"));
+        assert!(output.contains("Info No calendar pairs configured"));
+        assert!(output.contains("q quit"));
     }
 
     fn test_model() -> AppModel {
@@ -2584,14 +2601,26 @@ fn apply_tui_effects(model: &mut AppModel, effects: Vec<AppEffect>) -> bool {
 
 fn draw_tui(frame: &mut Frame<'_>, model: &AppModel) {
     let area = frame.area();
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
+    let has_notifications = !model.shell_snapshot().notifications.is_empty();
+    let constraints = if has_notifications {
+        vec![
+            Constraint::Length(4),
+            Constraint::Length(7),
+            Constraint::Min(10),
+            Constraint::Length(5),
+            Constraint::Length(4),
+        ]
+    } else {
+        vec![
             Constraint::Length(4),
             Constraint::Length(7),
             Constraint::Min(12),
             Constraint::Length(4),
-        ])
+        ]
+    };
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
         .split(area);
 
     render_header(frame, vertical[0], model);
@@ -2618,7 +2647,12 @@ fn draw_tui(frame: &mut Frame<'_>, model: &AppModel) {
         AppView::Runs => render_runs_screen(frame, vertical[2], model),
         AppView::Conflicts => render_conflicts_screen(frame, vertical[2], model),
     }
-    render_command_bar(frame, vertical[3], model);
+    if has_notifications {
+        render_notifications(frame, vertical[3], model);
+        render_command_bar(frame, vertical[4], model);
+    } else {
+        render_command_bar(frame, vertical[3], model);
+    }
     if model.command_palette_open {
         render_command_palette(frame, area, model);
     }
@@ -3034,6 +3068,40 @@ fn render_activity(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     ];
 
     frame.render_widget(List::new(items).block(chrome_block("Activity")), area);
+}
+
+fn render_notifications(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+    let shell = model.shell_snapshot();
+    let items = shell
+        .notifications
+        .iter()
+        .take(3)
+        .map(|notification| {
+            let severity = notification.severity;
+            let message_width = usize::from(area.width.saturating_sub(16)).clamp(18, 96);
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    notification_label(severity),
+                    Style::default()
+                        .fg(notification_color(severity))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    compact_string(&notification.message, message_width),
+                    Style::default().fg(Color::White),
+                ),
+            ]))
+        })
+        .collect::<Vec<_>>();
+
+    let title = if shell.notifications.len() > 3 {
+        format!("Notifications (+{})", shell.notifications.len() - 3)
+    } else {
+        "Notifications".to_string()
+    };
+
+    frame.render_widget(List::new(items).block(chrome_block(&title)), area);
 }
 
 fn render_runs_screen(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
@@ -3697,6 +3765,22 @@ fn command_color(command: AppCommand) -> Color {
         AppCommand::ShowRuns => color_success(),
         AppCommand::ExportReport => color_checking(),
         AppCommand::Quit => color_danger(),
+    }
+}
+
+fn notification_label(severity: AppNotificationSeverity) -> &'static str {
+    match severity {
+        AppNotificationSeverity::Info => "Info",
+        AppNotificationSeverity::Warning => "Warning",
+        AppNotificationSeverity::Error => "Error",
+    }
+}
+
+fn notification_color(severity: AppNotificationSeverity) -> Color {
+    match severity {
+        AppNotificationSeverity::Info => color_checking(),
+        AppNotificationSeverity::Warning => color_warning(),
+        AppNotificationSeverity::Error => color_danger(),
     }
 }
 

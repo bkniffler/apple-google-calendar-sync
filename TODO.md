@@ -215,7 +215,7 @@ border.
 - [ ] Investigate macOS menu-bar implementation options.
 - [ ] Investigate Windows tray implementation options.
 - [ ] Investigate Linux tray/AppIndicator practicality.
-- [ ] Support notifications for failed syncs and unresolved conflicts.
+- [x] Support notifications for failed syncs and unresolved conflicts.
 - [ ] Support safe quick actions: dry-run now, apply now, open conflicts, pause.
 
 ## 14. Packaging And Release
