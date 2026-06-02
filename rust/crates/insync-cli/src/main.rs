@@ -59,6 +59,7 @@ use ratatui::{
     },
 };
 use serde::Deserialize;
+use serde_json::Value;
 use std::{
     collections::HashMap,
     env, fs,
@@ -1363,8 +1364,19 @@ mod tests {
         model.conflict_details = vec![AppConflictDetail {
             id: "conflict-1".to_string(),
             pair_id: "personal".to_string(),
+            event_link_id: Some("link-1".to_string()),
             canonical_uid: Some("uid-1".to_string()),
             reason: "both_sides_changed".to_string(),
+            resolution_policy: "manual review; optional newest/google/icloud winner".to_string(),
+            google_title: Some("Planning Google".to_string()),
+            icloud_title: Some("Planning iCloud".to_string()),
+            google_start: Some("2026-06-02T12:00:00Z".to_string()),
+            icloud_start: Some("2026-06-02T13:00:00Z".to_string()),
+            google_status: Some("confirmed".to_string()),
+            icloud_status: Some("tentative".to_string()),
+            google_event_id: Some("google-1".to_string()),
+            icloud_href: Some("/cal/icloud-1.ics".to_string()),
+            diff_fields: "title|start|status".to_string(),
             created_at: "2026-06-02 12:01:00".to_string(),
         }];
 
@@ -1373,9 +1385,57 @@ mod tests {
         assert!(output.contains("Conflict Groups"));
         assert!(output.contains("personal"));
         assert!(output.contains("both_sides_changed"));
-        assert!(output.contains("Conflict Detail (2)"));
+        assert!(output.contains("Conflict Events (2)"));
+        assert!(output.contains("Conflict Comparison"));
+        assert!(output.contains("Planning Google"));
+        assert!(output.contains("Planning iCloud"));
+        assert!(output.contains("Policy: manual review"));
+        assert!(output.contains("Audit: unresolved since"));
         assert!(output.contains("uid-1"));
         assert!(output.contains("c conf"));
+    }
+
+    #[test]
+    fn conflict_snapshot_mapper_extracts_comparison_fields() {
+        let detail = conflict_detail_snapshot(UnresolvedConflictRow {
+            id: "conflict-1".to_string(),
+            sync_pair_id: "personal".to_string(),
+            event_link_id: Some("link-1".to_string()),
+            canonical_uid: Some("uid-1".to_string()),
+            reason: "both_sides_changed".to_string(),
+            google_snapshot: Some(serde_json::json!({
+                "title": "Google title",
+                "status": "confirmed",
+                "start": {
+                    "kind": "dateTime",
+                    "value": "2026-06-02T12:00:00Z",
+                    "timezone": "Europe/Berlin"
+                },
+                "providerMeta": { "eventId": "google-1" }
+            })),
+            icloud_snapshot: Some(serde_json::json!({
+                "title": "iCloud title",
+                "status": "tentative",
+                "start": {
+                    "kind": "date",
+                    "value": "2026-06-03"
+                },
+                "providerMeta": { "href": "/cal/icloud-1.ics" }
+            })),
+            created_at: "2026-06-02 12:01:00".to_string(),
+        });
+
+        assert_eq!(detail.google_title.as_deref(), Some("Google title"));
+        assert_eq!(detail.icloud_title.as_deref(), Some("iCloud title"));
+        assert_eq!(
+            detail.google_start.as_deref(),
+            Some("2026-06-02T12:00:00Z [Europe/Berlin]")
+        );
+        assert_eq!(detail.icloud_start.as_deref(), Some("2026-06-03"));
+        assert_eq!(detail.google_event_id.as_deref(), Some("google-1"));
+        assert_eq!(detail.icloud_href.as_deref(), Some("/cal/icloud-1.ics"));
+        assert_eq!(detail.diff_fields, "title|start|status");
+        assert!(detail.resolution_policy.contains("manual review"));
     }
 
     #[test]
@@ -2202,14 +2262,119 @@ fn conflict_detail_snapshots(db_path: &Path) -> Result<Vec<AppConflictDetail>> {
         },
     )?
     .into_iter()
-    .map(|row| AppConflictDetail {
+    .map(conflict_detail_snapshot)
+    .collect())
+}
+
+fn conflict_detail_snapshot(row: UnresolvedConflictRow) -> AppConflictDetail {
+    let google = row.google_snapshot.as_ref();
+    let icloud = row.icloud_snapshot.as_ref();
+    AppConflictDetail {
         id: row.id,
         pair_id: row.sync_pair_id,
+        event_link_id: row.event_link_id,
         canonical_uid: row.canonical_uid,
+        resolution_policy: conflict_resolution_policy(&row.reason),
+        diff_fields: conflict_diff_fields(google, icloud),
+        google_title: google.and_then(snapshot_title),
+        icloud_title: icloud.and_then(snapshot_title),
+        google_start: google.and_then(snapshot_start),
+        icloud_start: icloud.and_then(snapshot_start),
+        google_status: google.and_then(snapshot_status),
+        icloud_status: icloud.and_then(snapshot_status),
+        google_event_id: google.and_then(snapshot_google_event_id),
+        icloud_href: icloud.and_then(snapshot_icloud_href),
         reason: row.reason,
         created_at: row.created_at,
-    })
-    .collect())
+    }
+}
+
+fn snapshot_title(value: &Value) -> Option<String> {
+    non_empty_json_string(value.get("title"))
+}
+
+fn snapshot_status(value: &Value) -> Option<String> {
+    non_empty_json_string(value.get("status"))
+}
+
+fn snapshot_start(value: &Value) -> Option<String> {
+    snapshot_date(value.get("start")?)
+}
+
+fn snapshot_google_event_id(value: &Value) -> Option<String> {
+    non_empty_json_string(value.pointer("/providerMeta/eventId"))
+}
+
+fn snapshot_icloud_href(value: &Value) -> Option<String> {
+    non_empty_json_string(value.pointer("/providerMeta/href"))
+}
+
+fn snapshot_date(value: &Value) -> Option<String> {
+    let kind = value.get("kind").and_then(Value::as_str);
+    let raw_value = value.get("value").and_then(Value::as_str)?;
+    match kind {
+        Some("dateTime") => value
+            .get("timezone")
+            .and_then(Value::as_str)
+            .filter(|timezone| !timezone.trim().is_empty())
+            .map(|timezone| format!("{raw_value} [{timezone}]"))
+            .or_else(|| Some(raw_value.to_string())),
+        Some("date") | None => Some(raw_value.to_string()),
+        Some(_) => Some(raw_value.to_string()),
+    }
+}
+
+fn conflict_resolution_policy(reason: &str) -> String {
+    match reason {
+        "both_sides_changed" => "manual review; optional newest/google/icloud winner".to_string(),
+        "delete_vs_update" => "default policy update_wins unless configured".to_string(),
+        "unlinked_same_uid" => "manual review or configured UID policy".to_string(),
+        "icloud_uid_exists" => "ignore known collision or choose manual".to_string(),
+        _ => "manual review".to_string(),
+    }
+}
+
+fn conflict_diff_fields(google: Option<&Value>, icloud: Option<&Value>) -> String {
+    let Some(google) = google else {
+        return "google_missing".to_string();
+    };
+    let Some(icloud) = icloud else {
+        return "icloud_missing".to_string();
+    };
+
+    let fields = [
+        ("title", snapshot_title(google), snapshot_title(icloud)),
+        ("start", snapshot_start(google), snapshot_start(icloud)),
+        ("status", snapshot_status(google), snapshot_status(icloud)),
+        (
+            "location",
+            non_empty_json_string(google.get("location")),
+            non_empty_json_string(icloud.get("location")),
+        ),
+        (
+            "description",
+            non_empty_json_string(google.get("description")),
+            non_empty_json_string(icloud.get("description")),
+        ),
+    ];
+
+    let diff = fields
+        .into_iter()
+        .filter_map(|(field, left, right)| (left != right).then_some(field))
+        .collect::<Vec<_>>();
+    if diff.is_empty() {
+        "metadata".to_string()
+    } else {
+        diff.join("|")
+    }
+}
+
+fn non_empty_json_string(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn sync_run_status_label(status: SyncRunStatus) -> &'static str {
@@ -3572,17 +3737,27 @@ fn render_conflicts_screen(frame: &mut Frame<'_>, area: Rect, model: &AppModel) 
     if area.width < 100 {
         let body = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .constraints([
+                Constraint::Percentage(34),
+                Constraint::Percentage(33),
+                Constraint::Percentage(33),
+            ])
             .split(area);
         render_conflict_summary_table(frame, body[0], model);
         render_conflict_detail_table(frame, body[1], model);
+        render_conflict_workbench(frame, body[2], model);
     } else {
         let body = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
             .split(area);
+        let right = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+            .split(body[1]);
         render_conflict_summary_table(frame, body[0], model);
-        render_conflict_detail_table(frame, body[1], model);
+        render_conflict_detail_table(frame, right[0], model);
+        render_conflict_workbench(frame, right[1], model);
     }
 }
 
@@ -3713,7 +3888,7 @@ fn render_conflict_detail_table(frame: &mut Frame<'_>, area: Rect, model: &AppMo
             ],
         )
         .header(
-            Row::new(["UID", "Reason", "Created"]).style(
+            Row::new(["UID", "Diff", "Created"]).style(
                 Style::default()
                     .fg(color_muted())
                     .add_modifier(Modifier::BOLD),
@@ -3723,14 +3898,15 @@ fn render_conflict_detail_table(frame: &mut Frame<'_>, area: Rect, model: &AppMo
         Table::new(
             rows,
             [
-                Constraint::Length(16),
-                Constraint::Percentage(34),
-                Constraint::Percentage(34),
+                Constraint::Length(1),
+                Constraint::Percentage(24),
+                Constraint::Percentage(24),
+                Constraint::Percentage(24),
                 Constraint::Length(22),
             ],
         )
         .header(
-            Row::new(["ID", "UID", "Reason", "Created"]).style(
+            Row::new(["", "UID", "Google", "iCloud", "Created"]).style(
                 Style::default()
                     .fg(color_muted())
                     .add_modifier(Modifier::BOLD),
@@ -3740,8 +3916,8 @@ fn render_conflict_detail_table(frame: &mut Frame<'_>, area: Rect, model: &AppMo
 
     let title = model
         .selected_conflict_summary()
-        .map(|summary| format!("Conflict Detail ({})", summary.count))
-        .unwrap_or_else(|| "Conflict Detail".to_string());
+        .map(|summary| format!("Conflict Events ({})", summary.count))
+        .unwrap_or_else(|| "Conflict Events".to_string());
     frame.render_widget(table.block(chrome_block(&title)), area);
 }
 
@@ -3749,18 +3925,96 @@ fn conflict_detail_row(detail: &AppConflictDetail, compact: bool) -> Row<'static
     if compact {
         Row::new(vec![
             compact_string(detail.canonical_uid.as_deref().unwrap_or("-"), 24),
-            compact_string(&detail.reason, 36),
+            compact_string(&detail.diff_fields, 36),
             compact_string(&detail.created_at, 20),
         ])
     } else {
         Row::new(vec![
-            compact_string(&detail.id, 16),
-            compact_string(detail.canonical_uid.as_deref().unwrap_or("-"), 42),
-            compact_string(&detail.reason, 42),
+            ">".to_string(),
+            compact_string(detail.canonical_uid.as_deref().unwrap_or("-"), 26),
+            compact_string(detail.google_title.as_deref().unwrap_or("-"), 28),
+            compact_string(detail.icloud_title.as_deref().unwrap_or("-"), 28),
             compact_string(&detail.created_at, 22),
         ])
     }
     .style(Style::default().fg(Color::White))
+}
+
+fn render_conflict_workbench(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+    let details = model.selected_conflict_details();
+    let Some(detail) = details.first() else {
+        render_empty_state(
+            frame,
+            area,
+            "Conflict Comparison",
+            &[
+                "No conflict event selected.",
+                "Use j/k to choose a conflict group.",
+            ],
+            color_warning(),
+        );
+        return;
+    };
+
+    let summary = model.selected_conflict_summary();
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(
+                "Policy: ",
+                Style::default()
+                    .fg(color_warning())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(compact_detail_value(&detail.resolution_policy, area.width)),
+        ]),
+        Line::from(format!(
+            "Reason: {}",
+            compact_detail_value(&detail.reason, area.width)
+        )),
+        Line::from(format!(
+            "UID: {}",
+            compact_detail_value(detail.canonical_uid.as_deref().unwrap_or("-"), area.width)
+        )),
+        Line::from(format!(
+            "Diff: {}",
+            compact_detail_value(&detail.diff_fields, area.width)
+        )),
+        Line::from(format!(
+            "Google: {} | {} | {}",
+            compact_string(detail.google_title.as_deref().unwrap_or("-"), 24),
+            compact_string(detail.google_start.as_deref().unwrap_or("-"), 28),
+            detail.google_status.as_deref().unwrap_or("-")
+        )),
+        Line::from(format!(
+            "iCloud: {} | {} | {}",
+            compact_string(detail.icloud_title.as_deref().unwrap_or("-"), 24),
+            compact_string(detail.icloud_start.as_deref().unwrap_or("-"), 28),
+            detail.icloud_status.as_deref().unwrap_or("-")
+        )),
+        Line::from(format!(
+            "Audit: unresolved since {}; group first {} last {}; link {}",
+            detail.created_at,
+            summary
+                .map(|summary| summary.first_seen_at.as_str())
+                .unwrap_or("-"),
+            summary
+                .map(|summary| summary.last_seen_at.as_str())
+                .unwrap_or("-"),
+            detail.event_link_id.as_deref().unwrap_or("-")
+        )),
+        Line::from(format!(
+            "Provider IDs: G {} / I {}",
+            compact_string(detail.google_event_id.as_deref().unwrap_or("-"), 28),
+            compact_string(detail.icloud_href.as_deref().unwrap_or("-"), 28)
+        )),
+    ];
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(chrome_block("Conflict Comparison"))
+            .wrap(Wrap { trim: true }),
+        area,
+    );
 }
 
 fn render_command_bar(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {

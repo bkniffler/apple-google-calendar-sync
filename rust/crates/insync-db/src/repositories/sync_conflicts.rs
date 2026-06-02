@@ -27,8 +27,11 @@ pub struct UnresolvedConflictSummary {
 pub struct UnresolvedConflictRow {
     pub id: String,
     pub sync_pair_id: String,
+    pub event_link_id: Option<String>,
     pub canonical_uid: Option<String>,
     pub reason: String,
+    pub google_snapshot: Option<Value>,
+    pub icloud_snapshot: Option<Value>,
     pub created_at: String,
 }
 
@@ -272,8 +275,11 @@ where
         SELECT
           id,
           sync_pair_id,
+          event_link_id,
           canonical_uid,
           reason,
+          google_snapshot,
+          icloud_snapshot,
           created_at
         FROM sync_conflicts
         WHERE {where_clause}
@@ -288,8 +294,15 @@ where
             Ok(UnresolvedConflictRow {
                 id: row.get("id")?,
                 sync_pair_id: row.get("sync_pair_id")?,
+                event_link_id: row.get("event_link_id")?,
                 canonical_uid: row.get("canonical_uid")?,
                 reason: row.get("reason")?,
+                google_snapshot: row
+                    .get::<_, Option<String>>("google_snapshot")?
+                    .and_then(|value| serde_json::from_str(&value).ok()),
+                icloud_snapshot: row
+                    .get::<_, Option<String>>("icloud_snapshot")?
+                    .and_then(|value| serde_json::from_str(&value).ok()),
                 created_at: row.get("created_at")?,
             })
         })?
@@ -357,6 +370,16 @@ mod tests {
 
         let rows = list_unresolved_conflicts(&conn, ConflictFilter::default()).unwrap();
         assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0]
+                .google_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.get("title"))
+                .and_then(Value::as_str),
+            Some("Google")
+        );
+        assert!(rows[0].icloud_snapshot.is_none());
+        assert!(rows[0].event_link_id.is_none());
     }
 
     #[test]

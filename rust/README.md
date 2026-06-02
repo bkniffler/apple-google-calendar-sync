@@ -167,9 +167,10 @@ insync tui
 The TUI shows sync health, unresolved conflicts, recent run status, configured
 pairs, cached provider calendar names/accounts, raw calendar IDs, per-side last
 sync timestamps from SQLite, and a filterable recent-run history with selected
-run detail. It also has a conflict inspection view (`c`) for unresolved conflict
-groups and selected conflict rows, a dry-run report viewer (`v`) with action
-filters (`f`) and sort modes (`t`), plus a notification band for failed syncs,
+run detail. It also has a conflict workbench (`c`) for unresolved conflict
+groups, stored Google/iCloud snapshot comparison, selected policy context, and
+unresolved audit timestamps; a dry-run report viewer (`v`) with action filters
+(`f`) and sort modes (`t`); plus a notification band for failed syncs,
 unresolved conflicts, and setup nudges. Calendar names are populated after setup
 discovery or `insync db calendars` has cached provider metadata. Color semantics
 are kept consistent: neutral idle states, blue/cyan active states, green clean
