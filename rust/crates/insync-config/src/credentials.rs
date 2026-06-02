@@ -55,6 +55,48 @@ pub fn store_google_refresh_token(
     save_config(config_path, config)
 }
 
+pub fn store_google_client_secret(
+    config: &mut ServiceConfig,
+    config_path: impl AsRef<Path>,
+    client_secret: &str,
+) -> Result<(), ConfigError> {
+    match config.secret_store {
+        SecretStoreKind::None => {
+            config.google.client_secret = Some(client_secret.to_string());
+        }
+        SecretStoreKind::Os => {
+            set_secret(
+                &google_client_secret_key(&config.google.account_label),
+                client_secret,
+            )?;
+            config.google.client_secret = None;
+        }
+    }
+
+    save_config(config_path, config)
+}
+
+pub fn store_icloud_app_password(
+    config: &mut ServiceConfig,
+    config_path: impl AsRef<Path>,
+    app_password: &str,
+) -> Result<(), ConfigError> {
+    match config.secret_store {
+        SecretStoreKind::None => {
+            config.icloud.app_specific_password = Some(app_password.to_string());
+        }
+        SecretStoreKind::Os => {
+            set_secret(
+                &icloud_app_password_key(&config.icloud.account_label),
+                app_password,
+            )?;
+            config.icloud.app_specific_password = None;
+        }
+    }
+
+    save_config(config_path, config)
+}
+
 pub fn google_client_secret_key(account_label: &str) -> String {
     format!("google:{account_label}:client-secret")
 }
@@ -184,6 +226,37 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
 
         assert_eq!(saved.google.refresh_token.as_deref(), Some("new-token"));
+    }
+
+    #[test]
+    fn stores_google_client_secret_inline_when_secret_store_is_none() {
+        let path =
+            std::env::temp_dir().join(format!("insync-config-{}-secret.json", std::process::id()));
+        let mut config = config();
+        config.secret_store = SecretStoreKind::None;
+
+        store_google_client_secret(&mut config, &path, "new-secret").unwrap();
+        let saved = crate::load_config(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(saved.google.client_secret.as_deref(), Some("new-secret"));
+    }
+
+    #[test]
+    fn stores_icloud_app_password_inline_when_secret_store_is_none() {
+        let path =
+            std::env::temp_dir().join(format!("insync-config-{}-icloud.json", std::process::id()));
+        let mut config = config();
+        config.secret_store = SecretStoreKind::None;
+
+        store_icloud_app_password(&mut config, &path, "new-app-password").unwrap();
+        let saved = crate::load_config(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(
+            saved.icloud.app_specific_password.as_deref(),
+            Some("new-app-password")
+        );
     }
 
     #[test]

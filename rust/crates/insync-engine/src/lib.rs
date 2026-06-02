@@ -28,12 +28,15 @@ use insync_providers::{CalendarProvider, ProviderChangeSet, ProviderError, Provi
 use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},
+    future::Future,
     io::Write,
     path::{Path, PathBuf},
     time::Duration,
 };
 use thiserror::Error;
 use tokio::time;
+
+const PROVIDER_RETRY_ATTEMPTS: usize = 3;
 
 pub use insync_db::repositories::sync_conflicts::{
     ConflictFilter, UnresolvedConflictRow, UnresolvedConflictSummary,
@@ -156,6 +159,13 @@ pub struct PairPlanSummary {
     pub actions: usize,
     pub action_counts: BTreeMap<String, usize>,
     pub resolution_counts: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleConflictCleanupSummary {
+    pub db_path: PathBuf,
+    pub resolved_count: usize,
+    pub pair_counts: BTreeMap<String, usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -409,6 +419,25 @@ impl SyncEngine {
         }
     }
 
+    pub async fn run_forever_with_providers(
+        &self,
+        mode: RunMode,
+        providers: SyncProviders<'_>,
+        shutdown: impl std::future::Future<Output = ()>,
+    ) -> Result<(), EngineError> {
+        let interval = Duration::from_secs(self.config.sync.poll_interval_seconds);
+        tokio::pin!(shutdown);
+
+        loop {
+            self.plan_once_with_providers(mode, providers).await?;
+
+            tokio::select! {
+                _ = &mut shutdown => return Ok(()),
+                _ = time::sleep(interval) => {}
+            }
+        }
+    }
+
     pub fn conflict_summaries(&self) -> Result<Vec<UnresolvedConflictSummary>, EngineError> {
         let (_, conn) = self.prepare_database()?;
         Ok(list_unresolved_conflict_summaries(&conn)?)
@@ -425,6 +454,65 @@ impl SyncEngine {
     pub fn dedupe_conflicts(&self) -> Result<usize, EngineError> {
         let (_, conn) = self.prepare_database()?;
         Ok(dedupe_unresolved_conflicts(&conn)?)
+    }
+
+    pub async fn resolve_stale_conflicts_with_providers(
+        &self,
+        providers: SyncProviders<'_>,
+    ) -> Result<StaleConflictCleanupSummary, EngineError> {
+        let (db_path, conn) = self.prepare_database()?;
+        let _lock = acquire_sync_lock(&db_path)?;
+        let mut pair_counts = BTreeMap::new();
+        let mut resolved_count = 0;
+
+        for pair in self.config.sync.pairs.iter().filter(|pair| pair.enabled) {
+            let ids = configured_calendar_ids(&self.config, pair);
+            let google_sync_token = load_calendar_sync_token(&conn, &ids.google_calendar_id)?;
+            let icloud_sync_token = load_calendar_sync_token(&conn, &ids.icloud_calendar_id)?;
+            let google_changes = get_changes_with_token_recovery(
+                &conn,
+                providers.google,
+                &ids.google_calendar_id,
+                &pair.google_calendar_id,
+                google_sync_token,
+            )
+            .await?;
+            let icloud_changes = get_changes_with_token_recovery(
+                &conn,
+                providers.icloud,
+                &ids.icloud_calendar_id,
+                &pair.icloud_calendar_id,
+                icloud_sync_token,
+            )
+            .await?;
+            let links = load_event_links(&conn, &pair.id)?;
+            let known_icloud_uid_collisions = load_unresolved_conflict_uids(
+                &conn,
+                &pair.id,
+                "icloud_uid_exists_in_different_calendar",
+            )?;
+            let actions = plan_two_way_actions(insync_core::PlanTwoWayInput {
+                links: &links,
+                google_events: &google_changes.events,
+                icloud_events: &icloud_changes.events,
+                known_icloud_uid_collisions,
+                direction: pair.direction,
+                conflict_policy: planner_conflict_policies(&self.config),
+            });
+            let resolved =
+                resolve_stale_conflicts(&conn, &pair.id, &active_manual_conflicts(&actions))?;
+
+            if resolved > 0 {
+                pair_counts.insert(pair.id.clone(), resolved);
+                resolved_count += resolved;
+            }
+        }
+
+        Ok(StaleConflictCleanupSummary {
+            db_path,
+            resolved_count,
+            pair_counts,
+        })
     }
 
     pub fn write_dry_run_report(
@@ -474,31 +562,65 @@ async fn get_changes_with_token_recovery(
     provider_calendar_id: &str,
     sync_token: Option<String>,
 ) -> Result<ProviderChangeSet, EngineError> {
-    let first = provider
-        .get_changes(
-            provider_calendar_id,
-            ProviderSyncCursor {
-                full_sync: sync_token.is_none(),
-                sync_token: sync_token.clone(),
-            },
-        )
-        .await;
+    let first_cursor = ProviderSyncCursor {
+        full_sync: sync_token.is_none(),
+        sync_token: sync_token.clone(),
+    };
+    let first =
+        with_provider_retry(|| provider.get_changes(provider_calendar_id, first_cursor.clone()))
+            .await;
 
     match first {
         Err(ProviderError::SyncTokenExpired(_)) if sync_token.is_some() => {
             clear_calendar_sync_token(conn, db_calendar_id)?;
-            Ok(provider
-                .get_changes(
-                    provider_calendar_id,
-                    ProviderSyncCursor {
-                        full_sync: true,
-                        sync_token: None,
-                    },
-                )
-                .await?)
+            let full_cursor = ProviderSyncCursor {
+                full_sync: true,
+                sync_token: None,
+            };
+            Ok(with_provider_retry(|| {
+                provider.get_changes(provider_calendar_id, full_cursor.clone())
+            })
+            .await?)
         }
         result => Ok(result?),
     }
+}
+
+async fn with_provider_retry<T, Fut, F>(mut operation: F) -> Result<T, ProviderError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, ProviderError>>,
+{
+    for attempt in 0..PROVIDER_RETRY_ATTEMPTS {
+        match operation().await {
+            Err(error)
+                if is_transient_provider_error(&error) && attempt + 1 < PROVIDER_RETRY_ATTEMPTS =>
+            {
+                time::sleep(provider_retry_delay(attempt)).await;
+            }
+            result => return result,
+        }
+    }
+
+    unreachable!("provider retry loop always returns on final attempt")
+}
+
+fn is_transient_provider_error(error: &ProviderError) -> bool {
+    match error {
+        ProviderError::RateLimited { .. } | ProviderError::Network { .. } => true,
+        ProviderError::Http { status, .. } => (500..600).contains(status),
+        _ => false,
+    }
+}
+
+#[cfg(not(test))]
+fn provider_retry_delay(attempt: usize) -> Duration {
+    Duration::from_millis(500 * 2_u64.saturating_pow(attempt as u32))
+}
+
+#[cfg(test)]
+fn provider_retry_delay(_attempt: usize) -> Duration {
+    Duration::from_millis(1)
 }
 
 async fn apply_actions(
@@ -541,24 +663,27 @@ async fn apply_actions(
             }
             PlannedAction::Noop { .. } => {}
             PlannedAction::CreateGoogle(action) => {
-                let meta = providers
-                    .google
-                    .create_event(&pair.google_calendar_id, &action.event)
-                    .await?;
+                let meta = with_provider_retry(|| {
+                    providers
+                        .google
+                        .create_event(&pair.google_calendar_id, &action.event)
+                })
+                .await?;
                 upsert_event_link(conn, link_after_google_write(&pair.id, action, meta))?;
             }
             PlannedAction::CreateIcloud(action) => {
-                let meta = providers
-                    .icloud
-                    .create_event(&pair.icloud_calendar_id, &action.event)
-                    .await?;
+                let meta = with_provider_retry(|| {
+                    providers
+                        .icloud
+                        .create_event(&pair.icloud_calendar_id, &action.event)
+                })
+                .await?;
                 upsert_event_link(conn, link_after_icloud_write(&pair.id, action, meta))?;
             }
             PlannedAction::UpdateGoogle(action) => {
                 let remote_event_id = google_remote_event_id(action, "update_google")?;
-                let meta = providers
-                    .google
-                    .update_event(
+                let meta = with_provider_retry(|| {
+                    providers.google.update_event(
                         &pair.google_calendar_id,
                         &remote_event_id,
                         &action.event,
@@ -567,14 +692,14 @@ async fn apply_actions(
                             .as_ref()
                             .and_then(|link| link.google_etag.as_deref()),
                     )
-                    .await?;
+                })
+                .await?;
                 upsert_event_link(conn, link_after_google_write(&pair.id, action, meta))?;
             }
             PlannedAction::UpdateIcloud(action) => {
                 let remote_event_id = icloud_remote_event_id(action, "update_icloud")?;
-                let meta = providers
-                    .icloud
-                    .update_event(
+                let meta = with_provider_retry(|| {
+                    providers.icloud.update_event(
                         &pair.icloud_calendar_id,
                         &remote_event_id,
                         &action.event,
@@ -583,14 +708,14 @@ async fn apply_actions(
                             .as_ref()
                             .and_then(|link| link.icloud_etag.as_deref()),
                     )
-                    .await?;
+                })
+                .await?;
                 upsert_event_link(conn, link_after_icloud_write(&pair.id, action, meta))?;
             }
             PlannedAction::DeleteGoogle(action) => {
                 let remote_event_id = google_remote_event_id(action, "delete_google")?;
-                providers
-                    .google
-                    .delete_event(
+                with_provider_retry(|| {
+                    providers.google.delete_event(
                         &pair.google_calendar_id,
                         &remote_event_id,
                         action
@@ -598,7 +723,8 @@ async fn apply_actions(
                             .as_ref()
                             .and_then(|link| link.google_etag.as_deref()),
                     )
-                    .await?;
+                })
+                .await?;
                 upsert_event_link(
                     conn,
                     event_link_upsert(
@@ -617,9 +743,8 @@ async fn apply_actions(
             }
             PlannedAction::DeleteIcloud(action) => {
                 let remote_event_id = icloud_remote_event_id(action, "delete_icloud")?;
-                providers
-                    .icloud
-                    .delete_event(
+                with_provider_retry(|| {
+                    providers.icloud.delete_event(
                         &pair.icloud_calendar_id,
                         &remote_event_id,
                         action
@@ -627,7 +752,8 @@ async fn apply_actions(
                             .as_ref()
                             .and_then(|link| link.icloud_etag.as_deref()),
                     )
-                    .await?;
+                })
+                .await?;
                 upsert_event_link(
                     conn,
                     event_link_upsert(
@@ -1447,6 +1573,71 @@ mod tests {
         std::fs::remove_dir_all(&temp_dir).unwrap();
     }
 
+    #[test]
+    fn dry_run_report_matches_golden_fixture() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "insync-engine-report-fixture-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let report_path = temp_dir.join("dry-run.csv");
+        let rows = vec![
+            ReportRow {
+                pair_id: "personal".to_string(),
+                action: "create_icloud".to_string(),
+                canonical_uid: "uid-create".to_string(),
+                reason: String::new(),
+                resolution: String::new(),
+                conflict_policy: String::new(),
+                title: "Planning, with comma".to_string(),
+                google_present: "yes".to_string(),
+                icloud_present: "no".to_string(),
+                google_title: "Planning, with comma".to_string(),
+                icloud_title: String::new(),
+                google_start: "2026-06-01T12:00:00+00:00 [UTC]".to_string(),
+                icloud_start: String::new(),
+                google_end: "2026-06-01T13:00:00+00:00 [UTC]".to_string(),
+                icloud_end: String::new(),
+                google_status: "confirmed".to_string(),
+                icloud_status: String::new(),
+                google_hash: "hash-google-create".to_string(),
+                icloud_hash: String::new(),
+                diff_fields: String::new(),
+            },
+            ReportRow {
+                pair_id: "personal".to_string(),
+                action: "conflict".to_string(),
+                canonical_uid: "uid-conflict".to_string(),
+                reason: "both_sides_changed".to_string(),
+                resolution: "manual".to_string(),
+                conflict_policy: String::new(),
+                title: "Quote \"and\" newline\ntitle".to_string(),
+                google_present: "yes".to_string(),
+                icloud_present: "yes".to_string(),
+                google_title: "Google title".to_string(),
+                icloud_title: "iCloud title".to_string(),
+                google_start: "2026-06-02".to_string(),
+                icloud_start: "2026-06-02".to_string(),
+                google_end: "2026-06-03".to_string(),
+                icloud_end: "2026-06-03".to_string(),
+                google_status: "confirmed".to_string(),
+                icloud_status: "tentative".to_string(),
+                google_hash: "hash-google-conflict".to_string(),
+                icloud_hash: "hash-icloud-conflict".to_string(),
+                diff_fields: "title|status".to_string(),
+            },
+        ];
+
+        write_dry_run_report(&report_path, &rows).unwrap();
+        let body = std::fs::read_to_string(&report_path).unwrap();
+        let expected = include_str!("../fixtures/dry_run_report.csv");
+
+        assert_eq!(body, expected);
+
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
     #[tokio::test]
     async fn snapshots_are_reported_only_when_requested() {
         let temp_dir =
@@ -1563,6 +1754,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn daemon_loop_runs_provider_backed_apply_tick_before_shutdown() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("insync-engine-daemon-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let config_path = temp_dir.join("insync.json");
+        let config = config_with_db(".state/insync.db");
+        let engine = SyncEngine::with_config_path(config, &config_path);
+        let google = FakeProvider {
+            name: ProviderName::Google,
+            events: vec![event("uid-1", "Daemon", ProviderName::Google)],
+        };
+        let icloud = FakeProvider {
+            name: ProviderName::Icloud,
+            events: Vec::new(),
+        };
+
+        engine
+            .run_forever_with_providers(
+                RunMode::Apply,
+                SyncProviders {
+                    google: &google,
+                    icloud: &icloud,
+                },
+                async {},
+            )
+            .await
+            .unwrap();
+        let conn = insync_db::open(temp_dir.join(".state/insync.db")).unwrap();
+        let link = get_event_link(&conn, "personal", "uid-1").unwrap().unwrap();
+        let latest_run = engine.doctor().unwrap().latest_run.unwrap();
+
+        assert_eq!(
+            link.icloud_href.as_deref(),
+            Some("https://caldav.example/cal/uid-1.ics")
+        );
+        assert_eq!(latest_run.status, "completed");
+
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn provider_apply_records_manual_conflicts() {
         let temp_dir = std::env::temp_dir().join(format!(
             "insync-engine-apply-conflict-{}",
@@ -1652,6 +1885,58 @@ mod tests {
 
         assert_eq!(summary.action_counts.get("snapshot"), Some(&1));
         assert!(conflicts.is_empty());
+
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_conflict_cleanup_resolves_only_inactive_conflicts() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "insync-engine-stale-conflict-cleanup-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let config_path = temp_dir.join("insync.json");
+        let config = config_with_db(".state/insync.db");
+        let engine = SyncEngine::with_config_path(config, &config_path);
+        engine.doctor().unwrap();
+        let conn = insync_db::open(temp_dir.join(".state/insync.db")).unwrap();
+        for uid in ["uid-active", "uid-stale"] {
+            record_conflict(
+                &conn,
+                RecordConflictInput {
+                    sync_pair_id: "personal".to_string(),
+                    canonical_uid: uid.to_string(),
+                    reason: "unlinked_events_have_same_uid_but_differ".to_string(),
+                    ..RecordConflictInput::default()
+                },
+            )
+            .unwrap();
+        }
+        drop(conn);
+        let google = FakeProvider {
+            name: ProviderName::Google,
+            events: vec![event("uid-active", "Google title", ProviderName::Google)],
+        };
+        let icloud = FakeProvider {
+            name: ProviderName::Icloud,
+            events: vec![event("uid-active", "iCloud title", ProviderName::Icloud)],
+        };
+
+        let summary = engine
+            .resolve_stale_conflicts_with_providers(SyncProviders {
+                google: &google,
+                icloud: &icloud,
+            })
+            .await
+            .unwrap();
+        let conflicts = engine.conflict_details(ConflictFilter::default()).unwrap();
+
+        assert_eq!(summary.resolved_count, 1);
+        assert_eq!(summary.pair_counts.get("personal"), Some(&1));
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].canonical_uid.as_deref(), Some("uid-active"));
 
         std::fs::remove_dir_all(&temp_dir).unwrap();
     }
@@ -1771,6 +2056,44 @@ mod tests {
         assert!(!cursors[0].full_sync);
         assert_eq!(cursors[1].sync_token, None);
         assert!(cursors[1].full_sync);
+
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn provider_planning_retries_transient_fetch_errors() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "insync-engine-transient-fetch-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let config_path = temp_dir.join("insync.json");
+        let config = config_with_db(".state/insync.db");
+        let engine = SyncEngine::with_config_path(config, &config_path);
+        let google = TransientFetchProvider::new(
+            ProviderName::Google,
+            vec![event("uid-1", "Retry", ProviderName::Google)],
+            1,
+        );
+        let icloud = FakeProvider {
+            name: ProviderName::Icloud,
+            events: Vec::new(),
+        };
+
+        let summary = engine
+            .plan_once_with_providers(
+                RunMode::DryRun,
+                SyncProviders {
+                    google: &google,
+                    icloud: &icloud,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(summary.action_counts.get("create_icloud"), Some(&1));
+        assert_eq!(google.attempts(), 2);
 
         std::fs::remove_dir_all(&temp_dir).unwrap();
     }
@@ -2015,6 +2338,90 @@ mod tests {
             _etag: Option<&str>,
         ) -> Result<ProviderEventMeta, ProviderError> {
             Ok(meta(self.inner.name, calendar_id, event))
+        }
+
+        async fn delete_event(
+            &self,
+            _calendar_id: &str,
+            _remote_event_id: &str,
+            _etag: Option<&str>,
+        ) -> Result<(), ProviderError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct TransientFetchProvider {
+        name: ProviderName,
+        events: Vec<CanonicalEvent>,
+        remaining_failures: Arc<Mutex<usize>>,
+        attempts: Arc<Mutex<usize>>,
+    }
+
+    impl TransientFetchProvider {
+        fn new(name: ProviderName, events: Vec<CanonicalEvent>, failures: usize) -> Self {
+            Self {
+                name,
+                events,
+                remaining_failures: Arc::new(Mutex::new(failures)),
+                attempts: Arc::new(Mutex::new(0)),
+            }
+        }
+
+        fn attempts(&self) -> usize {
+            *self.attempts.lock().unwrap()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CalendarProvider for TransientFetchProvider {
+        fn name(&self) -> ProviderName {
+            self.name
+        }
+
+        async fn list_calendars(&self) -> Result<Vec<ProviderCalendar>, ProviderError> {
+            Ok(Vec::new())
+        }
+
+        async fn get_changes(
+            &self,
+            calendar_id: &str,
+            _cursor: ProviderSyncCursor,
+        ) -> Result<ProviderChangeSet, ProviderError> {
+            *self.attempts.lock().unwrap() += 1;
+            let mut remaining_failures = self.remaining_failures.lock().unwrap();
+            if *remaining_failures > 0 {
+                *remaining_failures -= 1;
+                return Err(ProviderError::Network {
+                    provider: self.name,
+                    message: "temporary network failure".to_string(),
+                });
+            }
+
+            Ok(ProviderChangeSet {
+                provider: self.name,
+                calendar_id: calendar_id.to_string(),
+                sync_token: None,
+                events: self.events.clone(),
+            })
+        }
+
+        async fn create_event(
+            &self,
+            calendar_id: &str,
+            event: &CanonicalEvent,
+        ) -> Result<ProviderEventMeta, ProviderError> {
+            Ok(meta(self.name, calendar_id, event))
+        }
+
+        async fn update_event(
+            &self,
+            calendar_id: &str,
+            _remote_event_id: &str,
+            event: &CanonicalEvent,
+            _etag: Option<&str>,
+        ) -> Result<ProviderEventMeta, ProviderError> {
+            Ok(meta(self.name, calendar_id, event))
         }
 
         async fn delete_event(

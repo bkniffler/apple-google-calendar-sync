@@ -1,0 +1,4 @@
+pair_id,action,canonical_uid,reason,resolution,conflict_policy,title,google_present,icloud_present,google_title,icloud_title,google_start,icloud_start,google_end,icloud_end,google_status,icloud_status,google_hash,icloud_hash,diff_fields
+personal,create_icloud,uid-create,,,,"Planning, with comma",yes,no,"Planning, with comma",,2026-06-01T12:00:00+00:00 [UTC],,2026-06-01T13:00:00+00:00 [UTC],,confirmed,,hash-google-create,,
+personal,conflict,uid-conflict,both_sides_changed,manual,,"Quote ""and"" newline
+title",yes,yes,Google title,iCloud title,2026-06-02,2026-06-02,2026-06-03,2026-06-03,confirmed,tentative,hash-google-conflict,hash-icloud-conflict,title|status

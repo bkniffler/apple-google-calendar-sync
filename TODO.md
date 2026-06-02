@@ -15,11 +15,11 @@ future interchangeable taskbar/menu-bar interface.
 
 ## 1. Rust Workspace
 
-- [ ] Commit the initial `rust/` workspace scaffold.
-- [ ] Add CI for `cd rust && cargo fmt --check && cargo test`.
-- [ ] Decide whether the root repo keeps both Bun and Rust checks during the
+- [x] Commit the initial `rust/` workspace scaffold.
+- [x] Add CI for `cd rust && cargo fmt --check && cargo test`.
+- [x] Decide whether the root repo keeps both Bun and Rust checks during the
       migration or adds a dedicated Rust workflow.
-- [ ] Add release/profile defaults once the CLI starts doing real work.
+- [x] Add release/profile defaults once the CLI starts doing real work.
 
 ## 2. Core Sync Logic
 
@@ -60,12 +60,12 @@ future interchangeable taskbar/menu-bar interface.
 ## 4. Config And Secrets
 
 - [x] Finish JSON read/write support in `insync-config`.
-- [ ] Support local config and OS app-data config paths.
-- [ ] Support explicit `--config` and `INSYNC_CONFIG` everywhere.
+- [x] Support local config and OS app-data config paths.
+- [x] Support explicit `--config` and `INSYNC_CONFIG` everywhere.
 - [x] Port `secretStore: "none" | "os"` behavior.
 - [x] Integrate OS keychain/credential storage for Google and iCloud secrets.
 - [x] Move inline secrets into the OS secret store when configured.
-- [ ] Add non-secret config validation with clear diagnostics.
+- [x] Add non-secret config validation with clear diagnostics.
 - [ ] Add config migration tests for future schema versions.
 
 ## 5. Provider Mapping
@@ -90,9 +90,10 @@ future interchangeable taskbar/menu-bar interface.
 - [x] Implement iCloud event list, create, update, delete.
 - [ ] Port iCloud cross-calendar UID collision probing and metadata reuse from
       the TypeScript provider.
-- [ ] Add typed provider errors for auth, rate limits, precondition failures,
+- [x] Add typed provider errors for auth, rate limits, precondition failures,
       UID collisions, network failures, and mapping failures.
-- [ ] Add retry/backoff policy for transient provider errors.
+- [ ] Emit UID collision errors from iCloud cross-calendar collision probing.
+- [x] Add retry/backoff policy for transient provider errors.
 - [ ] Add provider integration tests that can run against fixtures/mocks by
       default and real accounts only when explicitly enabled.
 
@@ -106,8 +107,8 @@ future interchangeable taskbar/menu-bar interface.
       core planner, and returns per-pair action/resolution counts.
 - [x] Wire the default Rust `sync` dry-run command to real Google and iCloud
       provider clients.
-- [ ] Replace the scaffolded `insync-engine` runner with real orchestration.
-- [ ] Load config, resolve secrets, open SQLite, run migrations, and seed pairs.
+- [x] Replace the scaffolded `insync-engine` runner with real orchestration.
+- [x] Load config, resolve secrets, open SQLite, run migrations, and seed pairs.
 - [x] Fetch provider changes for each enabled pair in dry-run mode.
 - [x] Plan actions through `insync-core` in dry-run mode.
 - [x] Load and pass stored provider sync tokens when fetching provider changes.
@@ -115,8 +116,9 @@ future interchangeable taskbar/menu-bar interface.
 - [x] Apply provider writes through injected providers only in apply mode.
 - [x] Record event links, sync state, sync runs, and conflicts from provider
       apply orchestration.
-- [ ] Enable live CLI `--apply` after repeated clean Rust dry-runs and at
-      least one test-calendar apply run.
+- [x] Enable explicit live CLI `--apply`.
+- [ ] Run and record at least one Rust `--apply` test against throwaway live
+      calendars before recommending it for primary calendars.
 - [x] Record scaffold sync runs and expose latest-run state for doctor/TUI.
 - [x] Resolve stale conflicts after successful apply runs.
 - [x] Add single-instance locking so two syncs cannot mutate the same DB.
@@ -132,7 +134,7 @@ future interchangeable taskbar/menu-bar interface.
 - [x] Wire fixture-backed CLI dry-run planning and report writing.
 - [x] Support `--report-all` for full snapshot/debug reports.
 - [x] Add summary counts by pair, action, reason, and resolution.
-- [ ] Add report fixtures so output stays stable across refactors.
+- [x] Add report fixtures so output stays stable across refactors.
 
 ## 9. Conflict Tools
 
@@ -140,21 +142,26 @@ future interchangeable taskbar/menu-bar interface.
 - [x] Port detailed conflict listing with filters.
 - [x] Port conflict CSV export.
 - [x] Port duplicate unresolved conflict cleanup.
-- [ ] Port stale conflict cleanup.
+- [x] Port stale conflict cleanup.
 - [ ] Add conflict inspection helpers for the TUI.
 - [ ] Add future manual-resolution commands once we know the desired workflow.
 
 ## 10. Setup Flow
 
-- [ ] Implement `insync setup` in Rust.
-- [ ] Create config in local path or OS app-data path.
-- [ ] Guide through Google OAuth credentials.
-- [ ] Run local callback server for Google OAuth.
-- [ ] Store refresh token in config or OS secret store based on config.
-- [ ] Guide through iCloud username and app-specific password.
-- [ ] Discover calendars from both providers.
-- [ ] Let the user select and name calendar pairs.
-- [ ] Run doctor checks at the end and show next safe command.
+- [x] Implement `insync setup` in Rust.
+- [x] Add initial `insync setup` config creation command.
+- [x] Create config in local path or OS app-data path.
+- [x] Add Google OAuth URL and auth-code exchange helpers.
+- [x] Add noninteractive Google OAuth credential storage.
+- [x] Guide through Google OAuth credentials interactively.
+- [x] Run local callback server for Google OAuth.
+- [x] Store refresh token in config or OS secret store based on config.
+- [x] Add noninteractive iCloud username and app-specific password storage.
+- [x] Guide through iCloud username and app-specific password interactively.
+- [x] Discover calendars from both providers.
+- [x] Add noninteractive calendar pair writing from discovered calendar IDs.
+- [x] Let the user select and name calendar pairs interactively.
+- [x] Run doctor checks at the end and show next safe command.
 
 ## 11. TUI
 
@@ -164,7 +171,7 @@ border.
 
 - [x] Build the first polished dashboard shell with sync status, active pair
       count, unresolved conflicts, selected pair, and recent app message.
-- [ ] Connect dashboard next-run data once daemon scheduling is wired.
+- [x] Connect dashboard next-run data once daemon scheduling is wired.
 - [x] Connect dashboard last-run and recent-error data from sync runs.
 - [x] Add the first calendar-pair screen with calendar IDs, direction, enabled
       state, and selection.
@@ -190,8 +197,8 @@ border.
 
 ## 12. Background Running
 
-- [ ] Implement daemon mode with interval scheduling.
-- [ ] Add graceful shutdown on Ctrl-C/signals.
+- [x] Implement daemon mode with interval scheduling.
+- [x] Add graceful shutdown on Ctrl-C/signals.
 - [ ] Add retry/backoff and jitter for transient failures.
 - [ ] Add sync lock acquisition and lock expiry handling.
 - [ ] Add `launchd` support for macOS user agents.
@@ -213,12 +220,12 @@ border.
 
 ## 14. Packaging And Release
 
-- [ ] Add `cargo install --path rust/crates/insync-cli` instructions.
-- [ ] Add release builds for macOS, Linux, and Windows.
+- [x] Add `cargo install --path rust/crates/insync-cli` instructions.
+- [x] Add release builds for macOS, Linux, and Windows.
 - [ ] Decide binary name and package naming.
-- [ ] Add bundled/default config search order documentation.
+- [x] Add bundled/default config search order documentation.
 - [ ] Add migration docs from Bun to Rust.
-- [ ] Add GitHub Actions artifact builds.
+- [x] Add GitHub Actions artifact builds.
 - [ ] Add signed/notarized macOS builds if we ship a menu-bar app.
 
 ## 15. Cutover

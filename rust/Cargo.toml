@@ -28,6 +28,7 @@ keyring = { version = "3.6", features = ["apple-native", "windows-native", "sync
 ratatui = "0.29"
 quick-xml = "0.38"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rpassword = "7.4"
 rusqlite = { version = "0.37", features = ["bundled", "chrono", "serde_json", "uuid"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -36,4 +37,10 @@ thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+url = "2.5"
 uuid = { version = "1", features = ["serde", "v4"] }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"

@@ -1,4 +1,5 @@
-use clap::{Parser, Subcommand};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use clap::{Parser, Subcommand, ValueEnum};
 use color_eyre::eyre::{Context, Result, bail};
 use crossterm::{
     event::{self, Event, KeyCode},
@@ -6,15 +7,25 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use insync_app::{AppEvent, AppModel, AppRuntimeSnapshot, AppStatus};
-use insync_config::{credentials::resolve_credentials, default_config_path, load_config};
-use insync_core::{CanonicalEvent, ProviderEventMeta, ProviderName};
+use insync_config::{
+    LOCAL_CONFIG_FILE, SecretStoreKind, SyncPairConfig, app_config_path,
+    credentials::{
+        resolve_credentials, store_google_client_secret, store_google_refresh_token,
+        store_icloud_app_password,
+    },
+    load_config, resolve_config_path, save_config, validate_config,
+};
+use insync_core::{CanonicalEvent, ProviderEventMeta, ProviderName, SyncDirection};
 use insync_engine::{
     ConflictFilter, DoctorSummary, ReportMode, RunMode, SyncEngine, SyncProviders,
     UnresolvedConflictRow, UnresolvedConflictSummary,
 };
 use insync_providers::{
     CalendarProvider, ProviderCalendar, ProviderChangeSet, ProviderError, ProviderSyncCursor,
-    google::{GoogleCalendarProvider, GoogleEvent, GoogleProviderOptions, google_to_canonical},
+    google::{
+        GoogleAuthCodeExchange, GoogleCalendarProvider, GoogleEvent, GoogleProviderOptions,
+        exchange_google_auth_code, google_auth_url, google_to_canonical,
+    },
     icloud::{
         CalendarObject, IcloudCalDavProvider, IcloudProviderOptions, ical_object_to_canonical,
     },
@@ -28,13 +39,24 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Gauge, List, ListItem, Paragraph, Row, Table, Wrap},
 };
 use serde::Deserialize;
-use std::{fs, io, path::PathBuf, time::Duration};
+use std::{
+    fs,
+    io::{self, Read, Write},
+    net::{TcpListener, TcpStream},
+    path::PathBuf,
+    time::Duration,
+};
 use tracing_subscriber::EnvFilter;
+use url::Url;
 
 #[derive(Debug, Parser)]
 #[command(name = "insync", version, about = "iCloud <-> Google Calendar sync")]
 struct Cli {
-    #[arg(long, env = "INSYNC_CONFIG")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Config path; also supports INSYNC_CONFIG"
+    )]
     config: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -43,36 +65,118 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    Doctor,
-    Conflicts {
+    Setup {
+        #[arg(long, value_enum, default_value_t = SetupLocation::Local)]
+        location: SetupLocation,
+        #[arg(long, value_enum, default_value_t = SetupSecretStore::Os)]
+        secret_store: SetupSecretStore,
         #[arg(long)]
-        details: bool,
+        force: bool,
         #[arg(long)]
-        reason: Option<String>,
-        #[arg(long)]
-        pair: Option<String>,
-        #[arg(long, default_value_t = 100)]
-        limit: u32,
+        discover: bool,
         #[arg(long)]
         csv: Option<PathBuf>,
         #[arg(long)]
-        dedupe: bool,
+        pair_id: Option<String>,
+        #[arg(long)]
+        google_calendar_id: Option<String>,
+        #[arg(long)]
+        icloud_calendar_id: Option<String>,
+        #[arg(long, value_enum, default_value_t = SetupDirection::TwoWay)]
+        direction: SetupDirection,
+        #[arg(long)]
+        disabled: bool,
+        #[arg(long)]
+        google_auth_url: bool,
+        #[arg(long)]
+        google_callback: bool,
+        #[arg(long)]
+        google_code: Option<String>,
+        #[arg(long, default_value = "http://127.0.0.1:8787/oauth2/callback")]
+        redirect_uri: String,
+        #[arg(long, default_value = "insync")]
+        state: String,
+        #[arg(long)]
+        google_account_label: Option<String>,
+        #[arg(long)]
+        google_client_id: Option<String>,
+        #[arg(long)]
+        google_client_secret: Option<String>,
+        #[arg(long)]
+        icloud_account_label: Option<String>,
+        #[arg(long)]
+        icloud_username: Option<String>,
+        #[arg(long)]
+        icloud_app_password: Option<String>,
+        #[arg(long)]
+        icloud_caldav_url: Option<String>,
+        #[arg(long)]
+        interactive: bool,
     },
-    Sync {
-        #[arg(long)]
-        apply: bool,
-        #[arg(long)]
+    #[command(about = "Validate config, credentials, database, and latest sync state")]
+    Doctor,
+    #[command(about = "Inspect, export, dedupe, or retire recorded manual conflicts")]
+    Conflicts {
+        #[arg(long, help = "Show individual conflict rows instead of pair summaries")]
+        details: bool,
+        #[arg(long, help = "Filter conflicts by planner reason")]
+        reason: Option<String>,
+        #[arg(long, help = "Filter conflicts by sync pair ID")]
+        pair: Option<String>,
+        #[arg(long, default_value_t = 100, help = "Maximum conflict rows to print")]
+        limit: u32,
+        #[arg(long, help = "Write conflict output as CSV")]
+        csv: Option<PathBuf>,
+        #[arg(long, help = "Resolve duplicate unresolved conflict rows in SQLite")]
+        dedupe: bool,
+        #[arg(
+            long,
+            help = "Fetch providers and resolve conflict rows that are no longer active"
+        )]
+        resolve_stale: bool,
+        #[arg(long, help = "Use fixture provider data instead of live calendars")]
         fixtures: Option<PathBuf>,
-        #[arg(long)]
+    },
+    #[command(about = "Plan a live sync by default, or execute writes with --apply")]
+    Sync {
+        #[arg(long, help = "Execute planned provider writes; omit for a dry-run")]
+        apply: bool,
+        #[arg(long, help = "Use fixture provider data instead of live calendars")]
+        fixtures: Option<PathBuf>,
+        #[arg(long, help = "Write planned actions as CSV")]
         report: Option<PathBuf>,
-        #[arg(long)]
+        #[arg(long, help = "Include no-op snapshots in the CSV report")]
         report_all: bool,
     },
+    #[command(about = "Run sync repeatedly until Ctrl-C")]
     Daemon {
-        #[arg(long)]
+        #[arg(long, help = "Execute provider writes on each daemon tick")]
         apply: bool,
     },
+    #[command(about = "Open the terminal dashboard")]
     Tui,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum SetupLocation {
+    Local,
+    App,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum SetupSecretStore {
+    None,
+    Os,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum SetupDirection {
+    #[value(alias = "two_way")]
+    TwoWay,
+    #[value(alias = "left-to-right", alias = "left_to_right")]
+    GoogleToIcloud,
+    #[value(alias = "right-to-left", alias = "right_to_left")]
+    IcloudToGoogle,
 }
 
 #[tokio::main]
@@ -81,15 +185,116 @@ async fn main() -> Result<()> {
     init_tracing();
 
     let cli = Cli::parse();
-    let config_path = match cli.config {
-        Some(path) => path,
-        None => default_config_path()?,
-    };
-    let config = load_config(&config_path)
-        .wrap_err_with(|| format!("loading config {}", config_path.display()))?;
+    let Cli { config, command } = cli;
 
-    match cli.command {
+    match command {
+        Command::Setup {
+            location,
+            secret_store,
+            force,
+            discover,
+            csv,
+            pair_id,
+            google_calendar_id,
+            icloud_calendar_id,
+            direction,
+            disabled,
+            google_auth_url,
+            google_callback,
+            google_code,
+            redirect_uri,
+            state,
+            google_account_label,
+            google_client_id,
+            google_client_secret,
+            icloud_account_label,
+            icloud_username,
+            icloud_app_password,
+            icloud_caldav_url,
+            interactive,
+        } => {
+            let add_pair = pair_id.is_some()
+                || google_calendar_id.is_some()
+                || icloud_calendar_id.is_some()
+                || disabled
+                || direction != SetupDirection::TwoWay;
+            let google_auth = google_auth_url || google_callback || google_code.is_some();
+            let credentials = google_account_label.is_some()
+                || google_client_id.is_some()
+                || google_client_secret.is_some()
+                || icloud_account_label.is_some()
+                || icloud_username.is_some()
+                || icloud_app_password.is_some()
+                || icloud_caldav_url.is_some();
+            if [discover, add_pair, google_auth, credentials, interactive]
+                .into_iter()
+                .filter(|active| *active)
+                .count()
+                > 1
+            {
+                bail!("combine only one setup action at a time");
+            }
+
+            if interactive {
+                setup_interactive(config, location, secret_store, force, redirect_uri, state)
+                    .await?;
+            } else if discover {
+                let (config_path, config) = load_validated_config(config)?;
+                let providers = live_providers(config, &config_path)?;
+                let calendars = discover_calendars(&providers).await?;
+                if let Some(path) = csv {
+                    write_calendar_discovery_csv(&path, &calendars)?;
+                    println!(
+                        "wrote {} calendar row(s) to {}",
+                        calendars.len(),
+                        path.display()
+                    );
+                } else {
+                    print_calendar_discovery(&calendars);
+                }
+            } else if add_pair {
+                setup_add_pair(
+                    config,
+                    SetupPairInput {
+                        pair_id,
+                        google_calendar_id,
+                        icloud_calendar_id,
+                        direction,
+                        enabled: !disabled,
+                        force,
+                    },
+                )?;
+            } else if google_auth {
+                setup_google_auth(
+                    config,
+                    SetupGoogleAuthInput {
+                        print_url: google_auth_url,
+                        callback: google_callback,
+                        code: google_code,
+                        redirect_uri,
+                        state,
+                    },
+                )
+                .await?;
+            } else if credentials {
+                setup_store_credentials(
+                    config,
+                    SetupCredentialsInput {
+                        google_account_label,
+                        google_client_id,
+                        google_client_secret,
+                        icloud_account_label,
+                        icloud_username,
+                        icloud_app_password,
+                        icloud_caldav_url,
+                    },
+                )?;
+            } else {
+                setup_init(config, location, secret_store, force)?;
+            }
+        }
         Command::Doctor => {
+            let (config_path, config) = load_validated_config(config)?;
             let engine = SyncEngine::with_config_path(config.clone(), &config_path);
             let summary = engine.doctor()?;
             println!("config: {}", config_path.display());
@@ -135,12 +340,38 @@ async fn main() -> Result<()> {
             limit,
             csv,
             dedupe,
+            resolve_stale,
+            fixtures,
         } => {
+            let (config_path, config) = load_validated_config(config)?;
             let engine = SyncEngine::with_config_path(config.clone(), &config_path);
 
             if dedupe {
                 let resolved = engine.dedupe_conflicts()?;
                 println!("deduped unresolved conflicts: {resolved}");
+                return Ok(());
+            }
+
+            if resolve_stale {
+                if let Some(fixtures) = fixtures {
+                    let providers = fixture_providers(&fixtures)?;
+                    let summary = engine
+                        .resolve_stale_conflicts_with_providers(SyncProviders {
+                            google: &providers.google,
+                            icloud: &providers.icloud,
+                        })
+                        .await?;
+                    print_stale_conflict_cleanup(&summary);
+                } else {
+                    let providers = live_providers(config.clone(), &config_path)?;
+                    let summary = engine
+                        .resolve_stale_conflicts_with_providers(SyncProviders {
+                            google: &providers.google,
+                            icloud: &providers.icloud,
+                        })
+                        .await?;
+                    print_stale_conflict_cleanup(&summary);
+                }
                 return Ok(());
             }
 
@@ -182,6 +413,7 @@ async fn main() -> Result<()> {
             report,
             report_all,
         } => {
+            let (config_path, config) = load_validated_config(config)?;
             let engine = SyncEngine::with_config_path(config.clone(), &config_path);
             if let Some(fixtures) = fixtures {
                 let providers = fixture_providers(&fixtures)?;
@@ -222,16 +454,14 @@ async fn main() -> Result<()> {
                 );
                 print_pair_plan_summaries(&summary.pair_summaries);
             } else {
-                if apply {
-                    bail!(
-                        "Rust apply mode is not wired to provider writes yet; run without --apply for live dry-run planning"
-                    );
-                }
-
                 let providers = live_providers(config.clone(), &config_path)?;
                 let summary = engine
                     .plan_once_with_providers_and_report_mode(
-                        RunMode::DryRun,
+                        if apply {
+                            RunMode::Apply
+                        } else {
+                            RunMode::DryRun
+                        },
                         SyncProviders {
                             google: &providers.google,
                             icloud: &providers.icloud,
@@ -252,7 +482,7 @@ async fn main() -> Result<()> {
                     );
                 }
                 println!(
-                    "planned live Rust dry-run: db={}, configured_pairs={}, enabled_pairs={}, action_counts={:?}, resolution_counts={:?}, mode={:?}",
+                    "planned live Rust sync: db={}, configured_pairs={}, enabled_pairs={}, action_counts={:?}, resolution_counts={:?}, mode={:?}",
                     summary.db_path.display(),
                     summary.configured_pair_count,
                     summary.enabled_pair_count,
@@ -264,14 +494,20 @@ async fn main() -> Result<()> {
             }
         }
         Command::Daemon { apply } => {
+            let (config_path, config) = load_validated_config(config)?;
             let engine = SyncEngine::with_config_path(config.clone(), &config_path);
-            println!("starting daemon scaffold; press Ctrl-C to stop");
+            let providers = live_providers(config.clone(), &config_path)?;
+            println!("starting daemon; press Ctrl-C to stop");
             engine
-                .run_forever(
+                .run_forever_with_providers(
                     if apply {
                         RunMode::Apply
                     } else {
                         RunMode::DryRun
+                    },
+                    SyncProviders {
+                        google: &providers.google,
+                        icloud: &providers.icloud,
                     },
                     async {
                         let _ = tokio::signal::ctrl_c().await;
@@ -280,10 +516,11 @@ async fn main() -> Result<()> {
                 .await?;
         }
         Command::Tui => {
+            let (config_path, config) = load_validated_config(config)?;
             let engine = SyncEngine::with_config_path(config.clone(), &config_path);
             let doctor = engine.doctor()?;
             let mut model = AppModel::from_config(&config);
-            model.apply_runtime_snapshot(runtime_snapshot_from_doctor(&doctor));
+            model.apply_runtime_snapshot(runtime_snapshot_from_doctor(&doctor, &config));
             run_tui(model)?;
         }
     }
@@ -291,7 +528,652 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn runtime_snapshot_from_doctor(summary: &DoctorSummary) -> AppRuntimeSnapshot {
+fn load_validated_config(
+    config: Option<PathBuf>,
+) -> Result<(PathBuf, insync_config::ServiceConfig)> {
+    let config_path = resolve_config_path(config)?;
+    let config = load_config(&config_path)
+        .wrap_err_with(|| format!("loading config {}", config_path.display()))?;
+    validate_config(&config)
+        .wrap_err_with(|| format!("validating config {}", config_path.display()))?;
+    Ok((config_path, config))
+}
+
+fn setup_init(
+    explicit_config: Option<PathBuf>,
+    location: SetupLocation,
+    secret_store: SetupSecretStore,
+    force: bool,
+) -> Result<()> {
+    let config_path = setup_config_path(explicit_config, location)?;
+    if config_path.exists() && !force {
+        bail!(
+            "config already exists at {}; pass --force to overwrite",
+            config_path.display()
+        );
+    }
+
+    let config = insync_config::ServiceConfig {
+        secret_store: match secret_store {
+            SetupSecretStore::None => SecretStoreKind::None,
+            SetupSecretStore::Os => SecretStoreKind::Os,
+        },
+        ..insync_config::ServiceConfig::default()
+    };
+    validate_config(&config)?;
+    save_config(&config_path, &config)
+        .wrap_err_with(|| format!("writing config {}", config_path.display()))?;
+
+    println!("created config: {}", config_path.display());
+    println!("secret store: {}", secret_store_label(config.secret_store));
+    println!("next: edit calendar pairs, then run insync doctor");
+    Ok(())
+}
+
+fn setup_config_path(explicit_config: Option<PathBuf>, location: SetupLocation) -> Result<PathBuf> {
+    if let Some(path) = explicit_config {
+        return Ok(path);
+    }
+
+    match location {
+        SetupLocation::Local => Ok(PathBuf::from(LOCAL_CONFIG_FILE)),
+        SetupLocation::App => Ok(app_config_path()?),
+    }
+}
+
+fn secret_store_label(secret_store: SecretStoreKind) -> &'static str {
+    match secret_store {
+        SecretStoreKind::None => "none",
+        SecretStoreKind::Os => "os",
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SetupPairInput {
+    pair_id: Option<String>,
+    google_calendar_id: Option<String>,
+    icloud_calendar_id: Option<String>,
+    direction: SetupDirection,
+    enabled: bool,
+    force: bool,
+}
+
+fn setup_add_pair(explicit_config: Option<PathBuf>, input: SetupPairInput) -> Result<()> {
+    let config_path = resolve_config_path(explicit_config)?;
+    let mut config = load_config(&config_path)
+        .wrap_err_with(|| format!("loading config {}", config_path.display()))?;
+    let pair = SyncPairConfig {
+        id: required_setup_value(input.pair_id, "--pair-id")?,
+        enabled: input.enabled,
+        direction: setup_direction(input.direction),
+        google_calendar_id: required_setup_value(input.google_calendar_id, "--google-calendar-id")?,
+        icloud_calendar_id: required_setup_value(input.icloud_calendar_id, "--icloud-calendar-id")?,
+    };
+
+    if let Some(index) = config
+        .sync
+        .pairs
+        .iter()
+        .position(|existing| existing.id == pair.id)
+    {
+        if !input.force {
+            bail!(
+                "sync pair {} already exists in {}; pass --force to replace it",
+                pair.id,
+                config_path.display()
+            );
+        }
+        config.sync.pairs[index] = pair;
+    } else {
+        config.sync.pairs.push(pair);
+    }
+
+    validate_config(&config)
+        .wrap_err_with(|| format!("validating config {}", config_path.display()))?;
+    save_config(&config_path, &config)
+        .wrap_err_with(|| format!("writing config {}", config_path.display()))?;
+    println!("saved config: {}", config_path.display());
+    println!("configured pairs: {}", config.sync.pairs.len());
+    Ok(())
+}
+
+fn required_setup_value(value: Option<String>, flag: &str) -> Result<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| color_eyre::eyre::eyre!("{flag} is required"))
+}
+
+fn setup_direction(direction: SetupDirection) -> SyncDirection {
+    match direction {
+        SetupDirection::TwoWay => SyncDirection::TwoWay,
+        SetupDirection::GoogleToIcloud => SyncDirection::LeftToRight,
+        SetupDirection::IcloudToGoogle => SyncDirection::RightToLeft,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SetupCredentialsInput {
+    google_account_label: Option<String>,
+    google_client_id: Option<String>,
+    google_client_secret: Option<String>,
+    icloud_account_label: Option<String>,
+    icloud_username: Option<String>,
+    icloud_app_password: Option<String>,
+    icloud_caldav_url: Option<String>,
+}
+
+fn setup_store_credentials(
+    explicit_config: Option<PathBuf>,
+    input: SetupCredentialsInput,
+) -> Result<()> {
+    let config_path = resolve_config_path(explicit_config)?;
+    let mut config = load_config(&config_path)
+        .wrap_err_with(|| format!("loading config {}", config_path.display()))?;
+
+    if let Some(value) = optional_setup_value(input.google_account_label) {
+        config.google.account_label = value;
+    }
+    if let Some(value) = optional_setup_value(input.google_client_id) {
+        config.google.client_id = Some(value);
+    }
+    if let Some(value) = optional_setup_value(input.icloud_account_label) {
+        config.icloud.account_label = value;
+    }
+    if let Some(value) = optional_setup_value(input.icloud_username) {
+        config.icloud.username = Some(value);
+    }
+    if let Some(value) = optional_setup_value(input.icloud_caldav_url) {
+        config.icloud.caldav_url = value;
+    }
+
+    validate_config(&config)
+        .wrap_err_with(|| format!("validating config {}", config_path.display()))?;
+    save_config(&config_path, &config)
+        .wrap_err_with(|| format!("writing config {}", config_path.display()))?;
+
+    if let Some(value) = optional_setup_value(input.google_client_secret) {
+        store_google_client_secret(&mut config, &config_path, &value).wrap_err_with(|| {
+            format!("storing Google client secret for {}", config_path.display())
+        })?;
+    }
+    if let Some(value) = optional_setup_value(input.icloud_app_password) {
+        store_icloud_app_password(&mut config, &config_path, &value).wrap_err_with(|| {
+            format!("storing iCloud app password for {}", config_path.display())
+        })?;
+    }
+
+    println!("saved config: {}", config_path.display());
+    println!("secret store: {}", secret_store_label(config.secret_store));
+    Ok(())
+}
+
+fn optional_setup_value(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+async fn setup_interactive(
+    explicit_config: Option<PathBuf>,
+    location: SetupLocation,
+    secret_store: SetupSecretStore,
+    force: bool,
+    redirect_uri: String,
+    state: String,
+) -> Result<()> {
+    let config_path = setup_config_path(explicit_config, location)?;
+    if !config_path.exists() {
+        setup_init(Some(config_path.clone()), location, secret_store, force)?;
+    }
+
+    let mut config = load_config(&config_path)
+        .wrap_err_with(|| format!("loading config {}", config_path.display()))?;
+
+    println!("Interactive setup for {}", config_path.display());
+    let google_client_id = prompt_text("Google client ID", config.google.client_id.as_deref())?;
+    if let Some(value) = optional_setup_value(Some(google_client_id)) {
+        config.google.client_id = Some(value);
+    }
+    let google_client_secret = prompt_secret(
+        "Google client secret",
+        config.google.client_secret.is_some(),
+    )?;
+    let icloud_username = prompt_text("iCloud username", config.icloud.username.as_deref())?;
+    if let Some(value) = optional_setup_value(Some(icloud_username)) {
+        config.icloud.username = Some(value);
+    }
+    let icloud_app_password = prompt_secret(
+        "iCloud app-specific password",
+        config.icloud.app_specific_password.is_some(),
+    )?;
+
+    validate_config(&config)
+        .wrap_err_with(|| format!("validating config {}", config_path.display()))?;
+    save_config(&config_path, &config)
+        .wrap_err_with(|| format!("writing config {}", config_path.display()))?;
+    if let Some(secret) = google_client_secret {
+        store_google_client_secret(&mut config, &config_path, &secret).wrap_err_with(|| {
+            format!("storing Google client secret for {}", config_path.display())
+        })?;
+    }
+    if let Some(secret) = icloud_app_password {
+        store_icloud_app_password(&mut config, &config_path, &secret).wrap_err_with(|| {
+            format!("storing iCloud app password for {}", config_path.display())
+        })?;
+    }
+
+    if prompt_yes_no("Run Google OAuth callback now?", false)? {
+        setup_google_auth(
+            Some(config_path.clone()),
+            SetupGoogleAuthInput {
+                print_url: false,
+                callback: true,
+                code: None,
+                redirect_uri,
+                state,
+            },
+        )
+        .await?;
+    }
+
+    if prompt_yes_no("Discover calendars and add a pair now?", false)? {
+        let (_, config) = load_validated_config(Some(config_path.clone()))?;
+        let providers = live_providers(config, &config_path)?;
+        let calendars = discover_calendars(&providers).await?;
+        let google_calendars = calendars
+            .iter()
+            .filter(|calendar| calendar.provider == ProviderName::Google)
+            .cloned()
+            .collect::<Vec<_>>();
+        let icloud_calendars = calendars
+            .iter()
+            .filter(|calendar| calendar.provider == ProviderName::Icloud)
+            .cloned()
+            .collect::<Vec<_>>();
+        let google_calendar_id = prompt_calendar_choice("Google calendar", &google_calendars)?;
+        let icloud_calendar_id = prompt_calendar_choice("iCloud calendar", &icloud_calendars)?;
+        let pair_id = prompt_text("Sync pair ID", Some("personal"))?;
+        setup_add_pair(
+            Some(config_path.clone()),
+            SetupPairInput {
+                pair_id: Some(pair_id),
+                google_calendar_id: Some(google_calendar_id),
+                icloud_calendar_id: Some(icloud_calendar_id),
+                direction: SetupDirection::TwoWay,
+                enabled: true,
+                force: true,
+            },
+        )?;
+    }
+
+    print_setup_doctor(&config_path)?;
+    println!("next: insync sync --report .insync/reports/rust-dry-run.csv");
+    Ok(())
+}
+
+fn prompt_text(label: &str, current: Option<&str>) -> Result<String> {
+    let suffix = current
+        .filter(|value| !value.is_empty())
+        .map(|value| format!(" [{value}]"))
+        .unwrap_or_default();
+    print!("{label}{suffix}: ");
+    io::stdout().flush()?;
+    let mut line = String::new();
+    io::stdin().read_line(&mut line)?;
+    let value = line.trim();
+    Ok(if value.is_empty() {
+        current.unwrap_or_default().to_string()
+    } else {
+        value.to_string()
+    })
+}
+
+fn prompt_secret(label: &str, has_existing: bool) -> Result<Option<String>> {
+    let suffix = if has_existing {
+        " [stored; leave blank to keep]"
+    } else {
+        " [leave blank to skip]"
+    };
+    let value = rpassword::prompt_password(format!("{label}{suffix}: "))?;
+    Ok(optional_setup_value(Some(value)))
+}
+
+fn prompt_yes_no(label: &str, default: bool) -> Result<bool> {
+    let suffix = if default { " [Y/n]" } else { " [y/N]" };
+    print!("{label}{suffix}: ");
+    io::stdout().flush()?;
+    let mut line = String::new();
+    io::stdin().read_line(&mut line)?;
+    let value = line.trim().to_lowercase();
+    if value.is_empty() {
+        Ok(default)
+    } else {
+        Ok(matches!(value.as_str(), "y" | "yes" | "true" | "1"))
+    }
+}
+
+fn prompt_calendar_choice(label: &str, calendars: &[DiscoveredCalendar]) -> Result<String> {
+    if calendars.is_empty() {
+        bail!("no {label} calendars discovered");
+    }
+
+    println!("{label}s:");
+    for (index, calendar) in calendars.iter().enumerate() {
+        println!(
+            "  {index}: {}{} ({})",
+            calendar.name,
+            if calendar.writable {
+                ""
+            } else {
+                " [read-only]"
+            },
+            calendar.id
+        );
+    }
+
+    loop {
+        let answer = prompt_text(&format!("{label} index"), Some("0"))?;
+        if let Ok(index) = answer.parse::<usize>()
+            && let Some(calendar) = calendars.get(index)
+        {
+            return Ok(calendar.id.clone());
+        }
+        println!("invalid selection");
+    }
+}
+
+fn print_setup_doctor(config_path: &PathBuf) -> Result<()> {
+    let config = load_config(config_path)
+        .wrap_err_with(|| format!("loading config {}", config_path.display()))?;
+    validate_config(&config)
+        .wrap_err_with(|| format!("validating config {}", config_path.display()))?;
+    let engine = SyncEngine::with_config_path(config, config_path);
+    let summary = engine.doctor()?;
+    println!("doctor:");
+    println!("  db: {}", summary.db_path.display());
+    println!("  configured pairs: {}", summary.configured_pair_count);
+    println!("  enabled pairs: {}", summary.enabled_pair_count);
+    println!(
+        "  google credentials: {}",
+        if summary.google_credentials_configured {
+            "configured"
+        } else {
+            "missing"
+        }
+    );
+    println!(
+        "  icloud credentials: {}",
+        if summary.icloud_credentials_configured {
+            "configured"
+        } else {
+            "missing"
+        }
+    );
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct SetupGoogleAuthInput {
+    print_url: bool,
+    callback: bool,
+    code: Option<String>,
+    redirect_uri: String,
+    state: String,
+}
+
+async fn setup_google_auth(
+    explicit_config: Option<PathBuf>,
+    input: SetupGoogleAuthInput,
+) -> Result<()> {
+    let auth_mode_count = [input.print_url, input.callback, input.code.is_some()]
+        .into_iter()
+        .filter(|active| *active)
+        .count();
+    if auth_mode_count != 1 {
+        bail!("choose exactly one Google auth mode");
+    }
+
+    let config_path = resolve_config_path(explicit_config)?;
+    let mut config = load_config(&config_path)
+        .wrap_err_with(|| format!("loading config {}", config_path.display()))?;
+    validate_config(&config)
+        .wrap_err_with(|| format!("validating config {}", config_path.display()))?;
+    let credentials = resolve_credentials(&mut config, &config_path)?;
+    let client_id = credentials
+        .google
+        .client_id
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| color_eyre::eyre::eyre!("google.clientId is required"))?;
+
+    if input.print_url {
+        println!(
+            "{}",
+            google_auth_url(&client_id, &input.redirect_uri, &input.state)
+        );
+        return Ok(());
+    }
+
+    let client_secret = credentials
+        .google
+        .client_secret
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| color_eyre::eyre::eyre!("google client secret is required"))?;
+
+    let code = if input.callback {
+        wait_for_google_auth_code(&client_id, &input.redirect_uri, &input.state)?
+    } else {
+        required_setup_value(input.code, "--google-code")?
+    };
+    let token = exchange_google_auth_code(GoogleAuthCodeExchange {
+        client_id,
+        client_secret,
+        redirect_uri: input.redirect_uri,
+        code,
+    })
+    .await?;
+    let refresh_token = token.refresh_token.ok_or_else(|| {
+        color_eyre::eyre::eyre!(
+            "Google did not return a refresh token; rerun the auth URL flow and grant consent again"
+        )
+    })?;
+    store_google_refresh_token(&mut config, &config_path, &refresh_token)
+        .wrap_err_with(|| format!("storing refresh token for {}", config_path.display()))?;
+
+    println!("stored Google refresh token");
+    println!("config: {}", config_path.display());
+    Ok(())
+}
+
+fn wait_for_google_auth_code(client_id: &str, redirect_uri: &str, state: &str) -> Result<String> {
+    let redirect = Url::parse(redirect_uri)
+        .wrap_err_with(|| format!("parsing redirect URI {redirect_uri}"))?;
+    if redirect.scheme() != "http" {
+        bail!("Google callback redirect URI must use http");
+    }
+    let host = redirect
+        .host_str()
+        .ok_or_else(|| color_eyre::eyre::eyre!("redirect URI is missing a host"))?;
+    if !matches!(host, "127.0.0.1" | "localhost" | "::1") {
+        bail!("Google callback host must be localhost, 127.0.0.1, or ::1");
+    }
+    let port = redirect
+        .port()
+        .ok_or_else(|| color_eyre::eyre::eyre!("redirect URI must include a port"))?;
+    let bind_host = if host == "localhost" {
+        "127.0.0.1"
+    } else {
+        host
+    };
+    let listener = TcpListener::bind((bind_host, port))
+        .wrap_err_with(|| format!("binding OAuth callback listener on {bind_host}:{port}"))?;
+    let auth_url = google_auth_url(client_id, redirect_uri, state);
+
+    println!("open this URL:");
+    println!("{auth_url}");
+    println!("waiting for Google OAuth callback on {redirect_uri}");
+
+    let (mut stream, _) = listener.accept()?;
+    handle_google_callback(&mut stream, &redirect, state)
+}
+
+fn handle_google_callback(
+    stream: &mut TcpStream,
+    redirect: &Url,
+    expected_state: &str,
+) -> Result<String> {
+    let mut buffer = [0_u8; 8192];
+    let count = stream.read(&mut buffer)?;
+    let request = String::from_utf8_lossy(&buffer[..count]);
+    let request_line = request
+        .lines()
+        .next()
+        .ok_or_else(|| color_eyre::eyre::eyre!("empty OAuth callback request"))?;
+    let path = request_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| color_eyre::eyre::eyre!("OAuth callback request is missing a path"))?;
+    let callback_url = redirect
+        .join(path)
+        .wrap_err_with(|| format!("parsing OAuth callback path {path}"))?;
+
+    if callback_url.path() != redirect.path() {
+        write_callback_response(stream, 404, "Not Found", "Unexpected callback path")?;
+        bail!("unexpected OAuth callback path: {}", callback_url.path());
+    }
+
+    let mut code = None;
+    let mut state = None;
+    let mut error = None;
+    for (key, value) in callback_url.query_pairs() {
+        match key.as_ref() {
+            "code" => code = Some(value.into_owned()),
+            "state" => state = Some(value.into_owned()),
+            "error" => error = Some(value.into_owned()),
+            _ => {}
+        }
+    }
+
+    if state.as_deref() != Some(expected_state) {
+        write_callback_response(stream, 400, "Bad Request", "Invalid OAuth state")?;
+        bail!("invalid OAuth callback state");
+    }
+    if let Some(error) = error {
+        write_callback_response(stream, 400, "Bad Request", "OAuth authorization failed")?;
+        bail!("Google OAuth authorization failed: {error}");
+    }
+    let code =
+        code.ok_or_else(|| color_eyre::eyre::eyre!("OAuth callback did not include a code"))?;
+    write_callback_response(
+        stream,
+        200,
+        "OK",
+        "insync received the Google OAuth code. You can close this browser tab.",
+    )?;
+
+    Ok(code)
+}
+
+fn write_callback_response(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    body: &str,
+) -> Result<()> {
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(response.as_bytes())?;
+    stream.flush()?;
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct DiscoveredCalendar {
+    provider: ProviderName,
+    id: String,
+    name: String,
+    timezone: String,
+    writable: bool,
+}
+
+async fn discover_calendars(providers: &LiveProviders) -> Result<Vec<DiscoveredCalendar>> {
+    let mut rows = Vec::new();
+    rows.extend(
+        providers
+            .google
+            .list_calendars()
+            .await?
+            .into_iter()
+            .map(|calendar| discovered_calendar(ProviderName::Google, calendar)),
+    );
+    rows.extend(
+        providers
+            .icloud
+            .list_calendars()
+            .await?
+            .into_iter()
+            .map(|calendar| discovered_calendar(ProviderName::Icloud, calendar)),
+    );
+    rows.sort_by(|left, right| {
+        left.provider
+            .to_string()
+            .cmp(&right.provider.to_string())
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    Ok(rows)
+}
+
+fn discovered_calendar(provider: ProviderName, calendar: ProviderCalendar) -> DiscoveredCalendar {
+    DiscoveredCalendar {
+        provider,
+        id: calendar.id,
+        name: calendar.name,
+        timezone: calendar.timezone.unwrap_or_default(),
+        writable: calendar.writable,
+    }
+}
+
+fn print_calendar_discovery(rows: &[DiscoveredCalendar]) {
+    println!("provider\twritable\tname\ttimezone\tid");
+    for row in rows {
+        println!(
+            "{}\t{}\t{}\t{}\t{}",
+            row.provider,
+            if row.writable { "yes" } else { "no" },
+            row.name,
+            row.timezone,
+            row.id
+        );
+    }
+}
+
+fn write_calendar_discovery_csv(path: &PathBuf, rows: &[DiscoveredCalendar]) -> Result<()> {
+    let lines = std::iter::once("provider,writable,name,timezone,id".to_string())
+        .chain(rows.iter().map(|row| {
+            [
+                row.provider.to_string(),
+                if row.writable { "yes" } else { "no" }.to_string(),
+                row.name.clone(),
+                row.timezone.clone(),
+                row.id.clone(),
+            ]
+            .map(csv_escape)
+            .join(",")
+        }))
+        .collect::<Vec<_>>();
+    write_text(path, &format!("{}\n", lines.join("\n")))
+}
+
+fn runtime_snapshot_from_doctor(
+    summary: &DoctorSummary,
+    config: &insync_config::ServiceConfig,
+) -> AppRuntimeSnapshot {
     AppRuntimeSnapshot {
         conflict_count: usize::try_from(summary.unresolved_conflict_count).unwrap_or(usize::MAX),
         last_run_at: summary.latest_run.as_ref().map(|run| {
@@ -300,11 +1182,21 @@ fn runtime_snapshot_from_doctor(summary: &DoctorSummary) -> AppRuntimeSnapshot {
                 .unwrap_or_else(|| run.started_at.clone())
         }),
         last_run_status: summary.latest_run.as_ref().map(|run| run.status.clone()),
+        next_run_at: next_run_at(summary, config.sync.poll_interval_seconds),
         recent_error: summary
             .latest_run
             .as_ref()
             .and_then(|run| run.error.clone()),
     }
+}
+
+fn next_run_at(summary: &DoctorSummary, poll_interval_seconds: u64) -> Option<String> {
+    let run = summary.latest_run.as_ref()?;
+    let timestamp = run.finished_at.as_ref().unwrap_or(&run.started_at);
+    let parsed = DateTime::parse_from_rfc3339(timestamp).ok()?;
+    let interval = ChronoDuration::seconds(i64::try_from(poll_interval_seconds).ok()?);
+
+    Some((parsed.with_timezone(&Utc) + interval).to_rfc3339())
 }
 
 fn print_pair_plan_summaries(rows: &[insync_engine::PairPlanSummary]) {
@@ -347,6 +1239,19 @@ fn print_conflict_details(rows: &[UnresolvedConflictRow]) {
             row.reason,
             row.created_at
         );
+    }
+}
+
+fn print_stale_conflict_cleanup(summary: &insync_engine::StaleConflictCleanupSummary) {
+    println!("resolved stale conflicts: {}", summary.resolved_count);
+    println!("db: {}", summary.db_path.display());
+    if summary.pair_counts.is_empty() {
+        return;
+    }
+
+    println!("pairs:");
+    for (pair_id, count) in &summary.pair_counts {
+        println!("  {pair_id}: {count}");
     }
 }
 
@@ -894,7 +1799,7 @@ fn render_selected_pair(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     } else {
         vec![
             Line::from("No calendar pairs configured."),
-            Line::from("Run setup once provider clients are wired."),
+            Line::from("Run insync setup --interactive to add calendars."),
         ]
     };
 
@@ -911,6 +1816,7 @@ fn render_activity(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
         format!("Status: {}", status_label(model.status)),
         format!("Unresolved conflicts: {}", model.conflict_count),
         format!("Last run: {}", last_run_label(model)),
+        format!("Next run: {}", next_run_label(model)),
         format!(
             "Recent error: {}",
             model.recent_error.as_deref().unwrap_or("-")
@@ -1015,6 +1921,13 @@ fn last_run_label(model: &AppModel) -> String {
         (Some(status), None) => status.to_string(),
         _ => "No runs yet".to_string(),
     }
+}
+
+fn next_run_label(model: &AppModel) -> String {
+    model
+        .next_run_at
+        .clone()
+        .unwrap_or_else(|| "not scheduled".to_string())
 }
 
 fn direction_label(direction: insync_core::SyncDirection) -> &'static str {

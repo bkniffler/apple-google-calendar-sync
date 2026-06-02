@@ -135,12 +135,12 @@ impl GoogleCalendarProvider {
             let response = request
                 .send()
                 .await
-                .map_err(|error| ProviderError::Request(error.to_string()))?;
+                .map_err(|error| ProviderError::network(ProviderName::Google, error))?;
             let status = response.status();
             let text = response
                 .text()
                 .await
-                .map_err(|error| ProviderError::Request(error.to_string()))?;
+                .map_err(|error| ProviderError::network(ProviderName::Google, error))?;
 
             if status.as_u16() == 410 {
                 return Err(ProviderError::SyncTokenExpired(ProviderName::Google));
@@ -149,15 +149,12 @@ impl GoogleCalendarProvider {
                 return Err(ProviderError::PreconditionFailed(ProviderName::Google));
             }
             if !status.is_success() {
-                if is_rate_limit_response(status.as_u16(), &text) && attempt < 5 {
+                let error = ProviderError::http(ProviderName::Google, status.as_u16(), text);
+                if error.is_rate_limited() && attempt < 5 {
                     time::sleep(rate_limit_delay(attempt)).await;
                     continue;
                 }
-                return Err(ProviderError::Http {
-                    provider: ProviderName::Google,
-                    status: status.as_u16(),
-                    body: text,
-                });
+                return Err(error);
             }
             if text.is_empty() {
                 return serde_json::from_value(serde_json::Value::Null)
@@ -168,7 +165,7 @@ impl GoogleCalendarProvider {
                 .map_err(|error| ProviderError::Mapping(error.to_string()));
         }
 
-        Err(ProviderError::Http {
+        Err(ProviderError::RateLimited {
             provider: ProviderName::Google,
             status: 429,
             body: "rate limit retries exhausted".to_string(),
@@ -207,12 +204,12 @@ impl GoogleCalendarProvider {
             let response = request
                 .send()
                 .await
-                .map_err(|error| ProviderError::Request(error.to_string()))?;
+                .map_err(|error| ProviderError::network(ProviderName::Google, error))?;
             let status = response.status();
             let text = response
                 .text()
                 .await
-                .map_err(|error| ProviderError::Request(error.to_string()))?;
+                .map_err(|error| ProviderError::network(ProviderName::Google, error))?;
 
             if status.as_u16() == 410 {
                 return Err(ProviderError::SyncTokenExpired(ProviderName::Google));
@@ -221,21 +218,18 @@ impl GoogleCalendarProvider {
                 return Err(ProviderError::PreconditionFailed(ProviderName::Google));
             }
             if !status.is_success() {
-                if is_rate_limit_response(status.as_u16(), &text) && attempt < 5 {
+                let error = ProviderError::http(ProviderName::Google, status.as_u16(), text);
+                if error.is_rate_limited() && attempt < 5 {
                     time::sleep(rate_limit_delay(attempt)).await;
                     continue;
                 }
-                return Err(ProviderError::Http {
-                    provider: ProviderName::Google,
-                    status: status.as_u16(),
-                    body: text,
-                });
+                return Err(error);
             }
 
             return Ok(());
         }
 
-        Err(ProviderError::Http {
+        Err(ProviderError::RateLimited {
             provider: ProviderName::Google,
             status: 429,
             body: "rate limit retries exhausted".to_string(),
@@ -275,19 +269,19 @@ impl GoogleCalendarProvider {
             .form(&params)
             .send()
             .await
-            .map_err(|error| ProviderError::Request(error.to_string()))?;
+            .map_err(|error| ProviderError::network(ProviderName::Google, error))?;
         let status = response.status();
         let text = response
             .text()
             .await
-            .map_err(|error| ProviderError::Request(error.to_string()))?;
+            .map_err(|error| ProviderError::network(ProviderName::Google, error))?;
 
         if !status.is_success() {
-            return Err(ProviderError::Http {
-                provider: ProviderName::Google,
-                status: status.as_u16(),
-                body: text,
-            });
+            return Err(ProviderError::http(
+                ProviderName::Google,
+                status.as_u16(),
+                text,
+            ));
         }
 
         let token: TokenResponse = serde_json::from_str(&text)
@@ -493,19 +487,19 @@ pub async fn exchange_google_auth_code_with_client(
         .form(&params)
         .send()
         .await
-        .map_err(|error| ProviderError::Request(error.to_string()))?;
+        .map_err(|error| ProviderError::network(ProviderName::Google, error))?;
     let status = response.status();
     let text = response
         .text()
         .await
-        .map_err(|error| ProviderError::Request(error.to_string()))?;
+        .map_err(|error| ProviderError::network(ProviderName::Google, error))?;
 
     if !status.is_success() {
-        return Err(ProviderError::Http {
-            provider: ProviderName::Google,
-            status: status.as_u16(),
-            body: text,
-        });
+        return Err(ProviderError::http(
+            ProviderName::Google,
+            status.as_u16(),
+            text,
+        ));
     }
 
     let parsed: AuthCodeTokenResponse =
@@ -515,12 +509,6 @@ pub async fn exchange_google_auth_code_with_client(
         access_token: parsed.access_token,
         expires_in: parsed.expires_in,
     })
-}
-
-fn is_rate_limit_response(status: u16, body: &str) -> bool {
-    status == 429
-        || (status == 403
-            && (body.contains("rateLimitExceeded") || body.contains("userRateLimitExceeded")))
 }
 
 fn rate_limit_delay(attempt: u32) -> Duration {
@@ -557,9 +545,19 @@ mod tests {
 
     #[test]
     fn detects_google_rate_limit_responses() {
-        assert!(is_rate_limit_response(429, ""));
-        assert!(is_rate_limit_response(403, "userRateLimitExceeded"));
-        assert!(!is_rate_limit_response(403, "forbidden"));
+        assert!(
+            ProviderError::http(ProviderName::Google, 429, "").is_rate_limited(),
+            "HTTP 429 should be typed as rate limited"
+        );
+        assert!(
+            ProviderError::http(ProviderName::Google, 403, "userRateLimitExceeded")
+                .is_rate_limited(),
+            "Google userRateLimitExceeded should be typed as rate limited"
+        );
+        assert!(
+            !ProviderError::http(ProviderName::Google, 403, "forbidden").is_rate_limited(),
+            "ordinary Google 403s are not necessarily rate limits"
+        );
     }
 
     #[test]

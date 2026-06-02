@@ -212,18 +212,18 @@ impl IcloudCalDavProvider {
         let response = request
             .send()
             .await
-            .map_err(|error| ProviderError::Request(error.to_string()))?;
+            .map_err(|error| ProviderError::network(ProviderName::Icloud, error))?;
         let status = response.status();
         let text = response
             .text()
             .await
-            .map_err(|error| ProviderError::Request(error.to_string()))?;
+            .map_err(|error| ProviderError::network(ProviderName::Icloud, error))?;
         if !status.is_success() {
-            return Err(ProviderError::Http {
-                provider: ProviderName::Icloud,
-                status: status.as_u16(),
-                body: text,
-            });
+            return Err(ProviderError::http(
+                ProviderName::Icloud,
+                status.as_u16(),
+                text,
+            ));
         }
 
         Ok(text)
@@ -256,7 +256,7 @@ impl IcloudCalDavProvider {
         let response = request
             .send()
             .await
-            .map_err(|error| ProviderError::Request(error.to_string()))?;
+            .map_err(|error| ProviderError::network(ProviderName::Icloud, error))?;
         let status = response.status();
         let etag = response
             .headers()
@@ -266,17 +266,17 @@ impl IcloudCalDavProvider {
         let text = response
             .text()
             .await
-            .map_err(|error| ProviderError::Request(error.to_string()))?;
+            .map_err(|error| ProviderError::network(ProviderName::Icloud, error))?;
 
         if status.as_u16() == 412 {
             return Err(ProviderError::PreconditionFailed(ProviderName::Icloud));
         }
         if !status.is_success() {
-            return Err(ProviderError::Http {
-                provider: ProviderName::Icloud,
-                status: status.as_u16(),
-                body: text,
-            });
+            return Err(ProviderError::http(
+                ProviderName::Icloud,
+                status.as_u16(),
+                text,
+            ));
         }
 
         Ok(etag)
@@ -379,22 +379,22 @@ impl CalendarProvider for IcloudCalDavProvider {
         let response = request
             .send()
             .await
-            .map_err(|error| ProviderError::Request(error.to_string()))?;
+            .map_err(|error| ProviderError::network(ProviderName::Icloud, error))?;
         let status = response.status();
         let text = response
             .text()
             .await
-            .map_err(|error| ProviderError::Request(error.to_string()))?;
+            .map_err(|error| ProviderError::network(ProviderName::Icloud, error))?;
 
         if status.as_u16() == 412 {
             return Err(ProviderError::PreconditionFailed(ProviderName::Icloud));
         }
         if !status.is_success() {
-            return Err(ProviderError::Http {
-                provider: ProviderName::Icloud,
-                status: status.as_u16(),
-                body: text,
-            });
+            return Err(ProviderError::http(
+                ProviderName::Icloud,
+                status.as_u16(),
+                text,
+            ));
         }
 
         Ok(())

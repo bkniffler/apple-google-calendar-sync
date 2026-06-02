@@ -10,6 +10,7 @@ pub struct AppModel {
     pub last_message: Option<String>,
     pub last_run_at: Option<String>,
     pub last_run_status: Option<String>,
+    pub next_run_at: Option<String>,
     pub recent_error: Option<String>,
     pub pairs: Vec<AppPair>,
 }
@@ -28,6 +29,7 @@ pub struct AppRuntimeSnapshot {
     pub conflict_count: usize,
     pub last_run_at: Option<String>,
     pub last_run_status: Option<String>,
+    pub next_run_at: Option<String>,
     pub recent_error: Option<String>,
 }
 
@@ -74,6 +76,7 @@ impl AppModel {
             last_message: None,
             last_run_at: None,
             last_run_status: None,
+            next_run_at: None,
             recent_error: None,
             pairs: config
                 .sync
@@ -103,6 +106,7 @@ impl AppModel {
         self.conflict_count = snapshot.conflict_count;
         self.last_run_at = snapshot.last_run_at;
         self.last_run_status = snapshot.last_run_status;
+        self.next_run_at = snapshot.next_run_at;
         self.recent_error = snapshot.recent_error;
     }
 
@@ -180,6 +184,7 @@ mod tests {
             last_message: None,
             last_run_at: None,
             last_run_status: None,
+            next_run_at: None,
             recent_error: None,
             pairs: Vec::new(),
         };
@@ -199,6 +204,7 @@ mod tests {
             last_message: None,
             last_run_at: None,
             last_run_status: None,
+            next_run_at: None,
             recent_error: None,
             pairs: vec![
                 AppPair {
@@ -233,6 +239,7 @@ mod tests {
             last_message: None,
             last_run_at: None,
             last_run_status: None,
+            next_run_at: None,
             recent_error: None,
             pairs: Vec::new(),
         };
@@ -241,11 +248,13 @@ mod tests {
             conflict_count: 3,
             last_run_at: Some("2026-06-02 12:00:00".to_string()),
             last_run_status: Some("failed".to_string()),
+            next_run_at: Some("2026-06-02 12:05:00".to_string()),
             recent_error: Some("auth failed".to_string()),
         });
 
         assert_eq!(model.conflict_count, 3);
         assert_eq!(model.last_run_status.as_deref(), Some("failed"));
+        assert_eq!(model.next_run_at.as_deref(), Some("2026-06-02 12:05:00"));
         assert_eq!(model.recent_error.as_deref(), Some("auth failed"));
     }
 }
