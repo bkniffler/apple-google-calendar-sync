@@ -206,6 +206,19 @@ work, updates no remote events, and can write CSV and JSON reports. `--apply`
 executes the planned provider writes, records event links and sync state in
 SQLite, and resolves stale manual conflicts after a successful run.
 
+Manual conflicts can be inspected and queued for explicit resolution:
+
+```bash
+insync conflicts --details
+insync conflicts --resolve <conflict-id> --resolution google-wins
+insync conflicts --resolve <conflict-id> --resolution icloud-wins
+insync conflicts --resolve <conflict-id> --resolution delete-wins
+insync conflicts --resolve <conflict-id> --resolution update-wins
+insync sync --apply
+```
+
+Queued resolutions are stored in SQLite and consumed by the next apply run.
+
 For repeated background runs:
 
 ```bash

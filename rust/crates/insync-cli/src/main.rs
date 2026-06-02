@@ -35,8 +35,8 @@ use insync_db::{
     },
 };
 use insync_engine::{
-    ConflictFilter, DoctorSummary, ReportMode, RunMode, SyncEngine, SyncProviders,
-    UnresolvedConflictRow, UnresolvedConflictSummary,
+    ConflictFilter, DoctorSummary, ManualResolution, ReportMode, RunMode, SyncEngine,
+    SyncProviders, UnresolvedConflictRow, UnresolvedConflictSummary,
 };
 use insync_providers::{
     CalendarProvider, ProviderCalendar, ProviderChangeSet, ProviderError, ProviderSyncCursor,
@@ -145,6 +145,19 @@ enum Command {
     },
     #[command(about = "Inspect, export, dedupe, or retire recorded manual conflicts")]
     Conflicts {
+        #[arg(
+            long,
+            value_name = "ID",
+            help = "Queue a manual resolution for a conflict row"
+        )]
+        resolve: Option<String>,
+        #[arg(
+            long,
+            value_enum,
+            requires = "resolve",
+            help = "Resolution to queue for --resolve"
+        )]
+        resolution: Option<ConflictResolutionArg>,
         #[arg(long, help = "Show individual conflict rows instead of pair summaries")]
         details: bool,
         #[arg(long, help = "Filter conflicts by planner reason")]
@@ -212,6 +225,25 @@ enum BackgroundCommand {
         #[arg(long, help = "Render daemon arguments with --apply")]
         apply: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ConflictResolutionArg {
+    GoogleWins,
+    IcloudWins,
+    DeleteWins,
+    UpdateWins,
+}
+
+impl From<ConflictResolutionArg> for ManualResolution {
+    fn from(value: ConflictResolutionArg) -> Self {
+        match value {
+            ConflictResolutionArg::GoogleWins => Self::GoogleWins,
+            ConflictResolutionArg::IcloudWins => Self::IcloudWins,
+            ConflictResolutionArg::DeleteWins => Self::DeleteWins,
+            ConflictResolutionArg::UpdateWins => Self::UpdateWins,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -435,6 +467,8 @@ async fn main() -> Result<()> {
             run_db_command(&config_path, config, command)?;
         }
         Command::Conflicts {
+            resolve,
+            resolution,
             details,
             reason,
             pair,
@@ -446,6 +480,29 @@ async fn main() -> Result<()> {
         } => {
             let (config_path, config) = load_validated_config(config)?;
             let engine = SyncEngine::with_config_path(config.clone(), &config_path);
+
+            if let Some(conflict_id) = resolve {
+                let Some(resolution) = resolution else {
+                    bail!("--resolve requires --resolution");
+                };
+                let queued = engine.request_conflict_resolution(&conflict_id, resolution.into())?;
+                let Some(conflict) = queued else {
+                    bail!("unresolved conflict not found: {conflict_id}");
+                };
+                println!(
+                    "queued manual resolution: id={}, pair={}, uid={}, reason={}, resolution={}",
+                    conflict.id,
+                    conflict.sync_pair_id,
+                    conflict.canonical_uid.as_deref().unwrap_or(""),
+                    conflict.reason,
+                    conflict
+                        .manual_resolution
+                        .map(|resolution| resolution.as_str())
+                        .unwrap_or("")
+                );
+                println!("run `insync sync --apply` to execute this resolution");
+                return Ok(());
+            }
 
             if dedupe {
                 let resolved = engine.dedupe_conflicts()?;
@@ -1468,6 +1525,8 @@ mod tests {
                 },
                 "providerMeta": { "href": "/cal/icloud-1.ics" }
             })),
+            manual_resolution: None,
+            resolution_requested_at: None,
             created_at: "2026-06-02 12:01:00".to_string(),
         });
 
@@ -2471,14 +2530,17 @@ fn print_conflict_summaries(rows: &[UnresolvedConflictSummary]) {
 }
 
 fn print_conflict_details(rows: &[UnresolvedConflictRow]) {
-    println!("id\tsync_pair_id\tcanonical_uid\treason\tcreated_at");
+    println!("id\tsync_pair_id\tcanonical_uid\treason\tmanual_resolution\tcreated_at");
     for row in rows {
         println!(
-            "{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}",
             row.id,
             row.sync_pair_id,
             row.canonical_uid.as_deref().unwrap_or(""),
             row.reason,
+            row.manual_resolution
+                .map(|resolution| resolution.as_str())
+                .unwrap_or(""),
             row.created_at
         );
     }
@@ -2515,19 +2577,26 @@ fn write_conflict_summary_csv(path: &PathBuf, rows: &[UnresolvedConflictSummary]
 }
 
 fn write_conflict_details_csv(path: &PathBuf, rows: &[UnresolvedConflictRow]) -> Result<()> {
-    let lines = std::iter::once("id,sync_pair_id,canonical_uid,reason,created_at".to_string())
-        .chain(rows.iter().map(|row| {
-            [
-                row.id.clone(),
-                row.sync_pair_id.clone(),
-                row.canonical_uid.clone().unwrap_or_default(),
-                row.reason.clone(),
-                row.created_at.clone(),
-            ]
-            .map(csv_escape)
-            .join(",")
-        }))
-        .collect::<Vec<_>>();
+    let lines = std::iter::once(
+        "id,sync_pair_id,canonical_uid,reason,manual_resolution,resolution_requested_at,created_at"
+            .to_string(),
+    )
+    .chain(rows.iter().map(|row| {
+        [
+            row.id.clone(),
+            row.sync_pair_id.clone(),
+            row.canonical_uid.clone().unwrap_or_default(),
+            row.reason.clone(),
+            row.manual_resolution
+                .map(|resolution| resolution.as_str().to_string())
+                .unwrap_or_default(),
+            row.resolution_requested_at.clone().unwrap_or_default(),
+            row.created_at.clone(),
+        ]
+        .map(csv_escape)
+        .join(",")
+    }))
+    .collect::<Vec<_>>();
     write_text(path, &format!("{}\n", lines.join("\n")))
 }
 

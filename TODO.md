@@ -144,7 +144,7 @@ future interchangeable taskbar/menu-bar interface.
 - [x] Port duplicate unresolved conflict cleanup.
 - [x] Port stale conflict cleanup.
 - [x] Add conflict inspection helpers for the TUI.
-- [ ] Add future manual-resolution commands once we know the desired workflow.
+- [x] Add future manual-resolution commands once we know the desired workflow.
 
 ## 10. Setup Flow
 

@@ -11,9 +11,11 @@ use insync_db::{
         configured_pairs::{configured_calendar_ids, seed_configured_pairs},
         event_links::{EventLinkUpsert, load_event_links, upsert_event_link},
         sync_conflicts::{
-            ActiveConflict, RecordConflictInput, dedupe_unresolved_conflicts,
+            ActiveConflict, ManualConflictResolution, PendingManualResolution, RecordConflictInput,
+            dedupe_unresolved_conflicts, get_unresolved_conflict, list_pending_manual_resolutions,
             list_unresolved_conflict_summaries, list_unresolved_conflicts,
-            load_unresolved_conflict_uids, record_conflict, resolve_stale_conflicts,
+            load_unresolved_conflict_uids, mark_manual_resolution_applied, record_conflict,
+            request_manual_resolution, resolve_stale_conflicts,
         },
         sync_runs::{
             SyncRun, SyncRunStatus, complete_sync_run, fail_sync_run, latest_sync_run,
@@ -47,7 +49,8 @@ const LOCK_STALE_AFTER: Duration = Duration::from_secs(6 * 60 * 60);
 const LOCK_STALE_AFTER: Duration = Duration::from_millis(100);
 
 pub use insync_db::repositories::sync_conflicts::{
-    ConflictFilter, UnresolvedConflictRow, UnresolvedConflictSummary,
+    ConflictFilter, ManualConflictResolution as ManualResolution, UnresolvedConflictRow,
+    UnresolvedConflictSummary,
 };
 
 #[derive(Debug, Error)]
@@ -359,12 +362,18 @@ impl SyncEngine {
                     direction: pair.direction,
                     conflict_policy: planner_conflict_policies(&self.config),
                 });
+                let pending_resolutions = list_pending_manual_resolutions(&conn, &pair.id)?;
+                let (actions, applied_manual_resolution_ids) =
+                    apply_pending_manual_resolutions(actions, &pending_resolutions, pair);
 
                 if mode == RunMode::Apply {
                     let mut active_conflicts = active_manual_conflicts(&actions);
                     active_conflicts.extend(
                         apply_actions(&conn, &self.config, pair, providers, &actions).await?,
                     );
+                    for conflict_id in applied_manual_resolution_ids {
+                        mark_manual_resolution_applied(&conn, &conflict_id)?;
+                    }
                     resolve_stale_conflicts(&conn, &pair.id, &active_conflicts)?;
                     update_calendar_sync_token(
                         &conn,
@@ -512,6 +521,18 @@ impl SyncEngine {
     pub fn dedupe_conflicts(&self) -> Result<usize, EngineError> {
         let (_, conn) = self.prepare_database()?;
         Ok(dedupe_unresolved_conflicts(&conn)?)
+    }
+
+    pub fn request_conflict_resolution(
+        &self,
+        conflict_id: &str,
+        resolution: ManualResolution,
+    ) -> Result<Option<UnresolvedConflictRow>, EngineError> {
+        let (_, conn) = self.prepare_database()?;
+        if request_manual_resolution(&conn, conflict_id, resolution)?.is_none() {
+            return Ok(None);
+        }
+        Ok(get_unresolved_conflict(&conn, conflict_id)?)
     }
 
     pub async fn resolve_stale_conflicts_with_providers(
@@ -1087,6 +1108,194 @@ fn synced_hash(google_hash: Option<&str>, icloud_hash: Option<&str>) -> Option<S
 
 fn now_string() -> String {
     Utc::now().to_rfc3339()
+}
+
+fn apply_pending_manual_resolutions(
+    actions: Vec<PlannedAction>,
+    pending: &[PendingManualResolution],
+    pair: &SyncPairConfig,
+) -> (Vec<PlannedAction>, Vec<String>) {
+    let mut applied_ids = Vec::new();
+    let actions = actions
+        .into_iter()
+        .map(|action| {
+            let PlannedAction::Conflict {
+                canonical_uid,
+                reason,
+                resolution: insync_core::ConflictResolution::Manual,
+                link,
+                google,
+                icloud,
+            } = action
+            else {
+                return action;
+            };
+
+            let Some(pending) = pending
+                .iter()
+                .find(|pending| pending.canonical_uid == canonical_uid && pending.reason == reason)
+            else {
+                return PlannedAction::Conflict {
+                    canonical_uid,
+                    reason,
+                    resolution: insync_core::ConflictResolution::Manual,
+                    link,
+                    google,
+                    icloud,
+                };
+            };
+
+            let resolved = manual_resolution_to_action(
+                &canonical_uid,
+                &reason,
+                link.clone(),
+                google.clone(),
+                icloud.clone(),
+                pending.resolution,
+                pair.direction,
+            );
+
+            if resolved.is_some() {
+                applied_ids.push(pending.conflict_id.clone());
+            }
+
+            resolved.unwrap_or_else(|| PlannedAction::Conflict {
+                canonical_uid,
+                reason,
+                resolution: insync_core::ConflictResolution::Manual,
+                link,
+                google,
+                icloud,
+            })
+        })
+        .collect();
+
+    (actions, applied_ids)
+}
+
+fn manual_resolution_to_action(
+    canonical_uid: &str,
+    reason: &str,
+    link: Option<insync_core::EventLink>,
+    google: Option<Box<CanonicalEvent>>,
+    icloud: Option<Box<CanonicalEvent>>,
+    resolution: ManualConflictResolution,
+    direction: insync_core::SyncDirection,
+) -> Option<PlannedAction> {
+    let google_hash = google.as_deref().map(hash_canonical_event);
+    let icloud_hash = icloud.as_deref().map(hash_canonical_event);
+    let manual_resolution = Some(insync_core::AutoResolution {
+        reason: reason.to_string(),
+        policy: format!("manual_{}", resolution.as_str()),
+    });
+
+    match resolution {
+        ManualConflictResolution::GoogleWins if can_write_icloud(direction) => {
+            let google_event = google.as_deref()?;
+            let action = MutatingAction {
+                canonical_uid: canonical_uid.to_string(),
+                event: Box::new(google_event.clone()),
+                link,
+                google,
+                icloud,
+                google_hash,
+                icloud_hash,
+                resolution: manual_resolution,
+            };
+            if action.icloud.is_some() {
+                Some(PlannedAction::UpdateIcloud(action))
+            } else {
+                Some(PlannedAction::CreateIcloud(action))
+            }
+        }
+        ManualConflictResolution::IcloudWins if can_write_google(direction) => {
+            let icloud_event = icloud.as_deref()?;
+            let action = MutatingAction {
+                canonical_uid: canonical_uid.to_string(),
+                event: Box::new(icloud_event.clone()),
+                link,
+                google,
+                icloud,
+                google_hash,
+                icloud_hash,
+                resolution: manual_resolution,
+            };
+            if action.google.is_some() {
+                Some(PlannedAction::UpdateGoogle(action))
+            } else {
+                Some(PlannedAction::CreateGoogle(action))
+            }
+        }
+        ManualConflictResolution::DeleteWins => match (google.as_deref(), icloud.as_deref()) {
+            (Some(google_event), None) if can_write_google(direction) => {
+                Some(PlannedAction::DeleteGoogle(MutatingAction {
+                    canonical_uid: canonical_uid.to_string(),
+                    event: Box::new(google_event.clone()),
+                    link,
+                    google,
+                    icloud,
+                    google_hash,
+                    icloud_hash,
+                    resolution: manual_resolution,
+                }))
+            }
+            (None, Some(icloud_event)) if can_write_icloud(direction) => {
+                Some(PlannedAction::DeleteIcloud(MutatingAction {
+                    canonical_uid: canonical_uid.to_string(),
+                    event: Box::new(icloud_event.clone()),
+                    link,
+                    google,
+                    icloud,
+                    google_hash,
+                    icloud_hash,
+                    resolution: manual_resolution,
+                }))
+            }
+            _ => None,
+        },
+        ManualConflictResolution::UpdateWins => match (google.as_deref(), icloud.as_deref()) {
+            (Some(google_event), None) if can_write_icloud(direction) => {
+                Some(PlannedAction::CreateIcloud(MutatingAction {
+                    canonical_uid: canonical_uid.to_string(),
+                    event: Box::new(google_event.clone()),
+                    link,
+                    google,
+                    icloud,
+                    google_hash,
+                    icloud_hash,
+                    resolution: manual_resolution,
+                }))
+            }
+            (None, Some(icloud_event)) if can_write_google(direction) => {
+                Some(PlannedAction::CreateGoogle(MutatingAction {
+                    canonical_uid: canonical_uid.to_string(),
+                    event: Box::new(icloud_event.clone()),
+                    link,
+                    google,
+                    icloud,
+                    google_hash,
+                    icloud_hash,
+                    resolution: manual_resolution,
+                }))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn can_write_google(direction: insync_core::SyncDirection) -> bool {
+    matches!(
+        direction,
+        insync_core::SyncDirection::TwoWay | insync_core::SyncDirection::RightToLeft
+    )
+}
+
+fn can_write_icloud(direction: insync_core::SyncDirection) -> bool {
+    matches!(
+        direction,
+        insync_core::SyncDirection::TwoWay | insync_core::SyncDirection::LeftToRight
+    )
 }
 
 #[derive(Debug)]
@@ -2192,6 +2401,87 @@ mod tests {
             conflicts[0].reason,
             "unlinked_events_have_same_uid_but_differ"
         );
+
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn provider_apply_consumes_manual_google_wins_resolution() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "insync-engine-manual-resolution-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let config_path = temp_dir.join("insync.json");
+        let config = config_with_db(".state/insync.db");
+        let engine = SyncEngine::with_config_path(config, &config_path);
+        engine.doctor().unwrap();
+        let base_event = event("uid-1", "Base title", ProviderName::Google);
+        let base_hash = hash_canonical_event(&base_event);
+        let conn = insync_db::open(temp_dir.join(".state/insync.db")).unwrap();
+        upsert_event_link(
+            &conn,
+            EventLinkUpsert {
+                sync_pair_id: "personal".to_string(),
+                canonical_uid: "uid-1".to_string(),
+                google_event_id: Some("uid-1".to_string()),
+                google_ical_uid: Some("uid-1".to_string()),
+                icloud_href: Some("https://caldav.example/cal/uid-1.ics".to_string()),
+                icloud_uid: Some("uid-1".to_string()),
+                google_hash: Some(base_hash.clone()),
+                icloud_hash: Some(base_hash.clone()),
+                last_synced_hash: Some(base_hash),
+                ..EventLinkUpsert::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+        let google = FakeProvider {
+            name: ProviderName::Google,
+            events: vec![event("uid-1", "Google title", ProviderName::Google)],
+        };
+        let icloud = FakeProvider {
+            name: ProviderName::Icloud,
+            events: vec![event("uid-1", "iCloud title", ProviderName::Icloud)],
+        };
+
+        engine
+            .plan_once_with_providers(
+                RunMode::Apply,
+                SyncProviders {
+                    google: &google,
+                    icloud: &icloud,
+                },
+            )
+            .await
+            .unwrap();
+        let conflict = engine
+            .conflict_details(ConflictFilter::default())
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        let queued = engine
+            .request_conflict_resolution(&conflict.id, ManualResolution::GoogleWins)
+            .unwrap()
+            .unwrap();
+        let summary = engine
+            .plan_once_with_providers(
+                RunMode::Apply,
+                SyncProviders {
+                    google: &google,
+                    icloud: &icloud,
+                },
+            )
+            .await
+            .unwrap();
+        let conflicts = engine.conflict_details(ConflictFilter::default()).unwrap();
+
+        assert_eq!(queued.manual_resolution, Some(ManualResolution::GoogleWins));
+        assert_eq!(summary.action_counts.get("update_icloud"), Some(&1));
+        assert_eq!(summary.resolution_counts.get("auto_resolved"), Some(&1));
+        assert!(conflicts.is_empty());
 
         std::fs::remove_dir_all(&temp_dir).unwrap();
     }

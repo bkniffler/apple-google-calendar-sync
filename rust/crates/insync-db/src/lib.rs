@@ -139,6 +139,8 @@ const EXPORT_TABLES: &[TableSpec] = &[
             "google_snapshot",
             "icloud_snapshot",
             "resolved_at",
+            "manual_resolution",
+            "resolution_requested_at",
             "created_at",
         ],
     },

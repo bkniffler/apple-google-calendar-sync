@@ -7,10 +7,11 @@ struct Migration {
     sql: &'static str,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    id: 1,
-    name: "initial_sync_ledger",
-    sql: r#"
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        id: 1,
+        name: "initial_sync_ledger",
+        sql: r#"
       CREATE TABLE accounts (
         id TEXT PRIMARY KEY,
         provider TEXT NOT NULL CHECK (provider IN ('google', 'icloud')),
@@ -98,7 +99,21 @@ const MIGRATIONS: &[Migration] = &[Migration {
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
     "#,
-}];
+    },
+    Migration {
+        id: 2,
+        name: "manual_conflict_resolutions",
+        sql: r#"
+          ALTER TABLE sync_conflicts
+            ADD COLUMN manual_resolution TEXT CHECK (
+              manual_resolution IN ('google_wins', 'icloud_wins', 'delete_wins', 'update_wins')
+            );
+
+          ALTER TABLE sync_conflicts
+            ADD COLUMN resolution_requested_at TEXT;
+        "#,
+    },
+];
 
 pub fn migrate(conn: &Connection) -> Result<(), DbError> {
     conn.execute_batch(
@@ -169,6 +184,6 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(count, 1);
+        assert_eq!(count, MIGRATIONS.len() as i64);
     }
 }
