@@ -230,6 +230,7 @@ border.
 
 ## 15. Cutover
 
+- [x] Add repeatable TypeScript/Rust dry-run comparison harness.
 - [ ] Run TypeScript and Rust dry-runs against the same calendars.
 - [ ] Compare action counts, conflict counts, and CSV report rows.
 - [ ] Run Rust apply against test calendars.
@@ -239,6 +240,6 @@ border.
 
 ## Immediate Next Step
 
-Port the planner and event hashing into `insync-core`, then make the Rust tests
-match the TypeScript planner tests. That gives the migration a trustworthy spine
-before provider writes or background scheduling enter the picture.
+Run `bun run parity:dry-run` against the configured calendars, inspect
+`.insync/parity/comparison.json`, and only then run Rust apply against
+throwaway calendars.

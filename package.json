@@ -16,6 +16,7 @@
     "sync:dry": "bun src/index.ts sync --once",
     "sync:apply": "bun src/index.ts sync --once --apply",
     "sync:watch": "bun src/index.ts sync --watch --apply",
+    "parity:dry-run": "bun scripts/compare-dry-runs.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test"
   },

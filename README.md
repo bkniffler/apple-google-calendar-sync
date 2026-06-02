@@ -124,6 +124,16 @@ actionable rows by default. Add `--report-all` to include snapshots:
 bun src/index.ts sync --once --report-all
 ```
 
+During the Rust migration, compare Bun and Rust dry-runs with:
+
+```bash
+bun run parity:dry-run -- --config ./insync.local.json
+```
+
+The comparison writes reports and `.insync/parity/comparison.json`, then exits
+non-zero if action counts, reason counts, resolution counts, or normalized CSV
+rows differ.
+
 ## Conflict Policies
 
 `sync.conflicts` controls automatic conflict handling.

@@ -343,19 +343,40 @@ Recommended migration:
    insync --config ../insync.local.json doctor
    ```
 
-5. Run a Rust dry-run and write reports:
+5. Run the TypeScript/Rust dry-run parity harness:
 
    ```bash
+   cd ..
+   bun run parity:dry-run -- --config ./insync.local.json
+   ```
+
+   The harness writes TypeScript and Rust reports plus a comparison summary to
+   `.insync/parity/`. It exits non-zero when row counts, action counts, reason
+   counts, resolution counts, or normalized common CSV rows differ.
+
+   To compare existing CSVs without fetching providers again:
+
+   ```bash
+   bun scripts/compare-dry-runs.ts \
+     --skip-run \
+     --ts-report .insync/reports/typescript-dry-run.csv \
+     --rust-report .insync/reports/rust-dry-run.csv
+   ```
+
+6. You can also run a Rust dry-run directly and write reports:
+
+   ```bash
+   cd rust
    insync --config ../insync.local.json sync \
      --report ../.insync/reports/rust-dry-run.csv \
      --summary-json ../.insync/reports/rust-summary.json
    ```
 
-6. Compare the Rust report/counts with the Bun dry-run report before enabling
+7. Compare the Rust report/counts with the Bun dry-run report before enabling
    `--apply`. Expect harmless ordering differences, but pair counts, conflict
    counts, and actionable rows should make sense.
 
-7. Only after repeated clean dry-runs, test Rust apply on throwaway calendars
+8. Only after repeated clean dry-runs, test Rust apply on throwaway calendars
    before pointing it at primary calendars:
 
    ```bash
