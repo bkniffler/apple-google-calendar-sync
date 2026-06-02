@@ -175,7 +175,7 @@ border.
 - [x] Connect dashboard last-run and recent-error data from sync runs.
 - [x] Add the first calendar-pair screen with calendar IDs, direction, enabled
       state, and selection.
-- [ ] Add provider display names, calendar names, and last sync state once
+- [x] Add provider display names, calendar names, and last sync state once
       discovery and sync-state repositories are wired into the TUI.
 - [ ] Add a dry-run report viewer with sortable/filterable action rows.
 - [ ] Add a conflict workbench with grouped reasons, event detail comparison,

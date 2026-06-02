@@ -6,7 +6,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use insync_app::{AppEvent, AppModel, AppRuntimeSnapshot, AppStatus};
+use insync_app::{AppEvent, AppModel, AppPairRuntimeSnapshot, AppRuntimeSnapshot, AppStatus};
 use insync_config::{
     LOCAL_CONFIG_FILE, SecretStoreKind, SyncPairConfig, app_config_path,
     credentials::{
@@ -18,7 +18,10 @@ use insync_config::{
 use insync_core::{CanonicalEvent, ProviderEventMeta, ProviderName, SyncDirection};
 use insync_db::{
     backup_database, export_database_json, import_database_json, migrate, open,
-    repositories::{calendars::list_calendars, configured_pairs::seed_configured_pairs},
+    repositories::{
+        calendars::{CalendarRow, list_calendars},
+        configured_pairs::{configured_calendar_ids, seed_configured_pairs},
+    },
 };
 use insync_engine::{
     ConflictFilter, DoctorSummary, ReportMode, RunMode, SyncEngine, SyncProviders,
@@ -44,6 +47,7 @@ use ratatui::{
 };
 use serde::Deserialize;
 use std::{
+    collections::HashMap,
     env, fs,
     io::{self, Read, Write},
     net::{TcpListener, TcpStream},
@@ -628,7 +632,7 @@ async fn main() -> Result<()> {
             let engine = SyncEngine::with_config_path(config.clone(), &config_path);
             let doctor = engine.doctor()?;
             let mut model = AppModel::from_config(&config);
-            model.apply_runtime_snapshot(runtime_snapshot_from_doctor(&doctor, &config));
+            model.apply_runtime_snapshot(runtime_snapshot_from_doctor(&doctor, &config)?);
             run_tui(model)?;
         }
     }
@@ -1856,8 +1860,8 @@ fn write_calendar_discovery_csv(path: &PathBuf, rows: &[DiscoveredCalendar]) -> 
 fn runtime_snapshot_from_doctor(
     summary: &DoctorSummary,
     config: &insync_config::ServiceConfig,
-) -> AppRuntimeSnapshot {
-    AppRuntimeSnapshot {
+) -> Result<AppRuntimeSnapshot> {
+    Ok(AppRuntimeSnapshot {
         conflict_count: usize::try_from(summary.unresolved_conflict_count).unwrap_or(usize::MAX),
         last_run_at: summary.latest_run.as_ref().map(|run| {
             run.finished_at
@@ -1870,7 +1874,56 @@ fn runtime_snapshot_from_doctor(
             .latest_run
             .as_ref()
             .and_then(|run| run.error.clone()),
-    }
+        pairs: pair_runtime_snapshots(&summary.db_path, config)?,
+    })
+}
+
+fn pair_runtime_snapshots(
+    db_path: &Path,
+    config: &insync_config::ServiceConfig,
+) -> Result<Vec<AppPairRuntimeSnapshot>> {
+    let conn = open(db_path)?;
+    migrate(&conn)?;
+    let calendars = list_calendars(&conn)?;
+    let calendars = calendars
+        .into_iter()
+        .map(|calendar| (calendar.id.clone(), calendar))
+        .collect::<HashMap<_, _>>();
+
+    Ok(config
+        .sync
+        .pairs
+        .iter()
+        .map(|pair| {
+            let ids = configured_calendar_ids(config, pair);
+            let google = calendars.get(&ids.google_calendar_id);
+            let icloud = calendars.get(&ids.icloud_calendar_id);
+            AppPairRuntimeSnapshot {
+                pair_id: pair.id.clone(),
+                google_calendar_name: calendar_name(google, &pair.google_calendar_id),
+                icloud_calendar_name: calendar_name(icloud, &pair.icloud_calendar_id),
+                google_account_label: google.map(|calendar| calendar.account_email.clone()),
+                icloud_account_label: icloud.map(|calendar| calendar.account_email.clone()),
+                google_last_sync_at: calendar_last_sync_at(google),
+                icloud_last_sync_at: calendar_last_sync_at(icloud),
+            }
+        })
+        .collect())
+}
+
+fn calendar_name(calendar: Option<&CalendarRow>, fallback_id: &str) -> Option<String> {
+    calendar
+        .and_then(|calendar| calendar.name.clone())
+        .filter(|name| !name.trim().is_empty() && name != fallback_id)
+}
+
+fn calendar_last_sync_at(calendar: Option<&CalendarRow>) -> Option<String> {
+    calendar.and_then(|calendar| {
+        calendar
+            .last_incremental_sync_at
+            .clone()
+            .or_else(|| calendar.last_full_sync_at.clone())
+    })
 }
 
 fn next_run_at(summary: &DoctorSummary, poll_interval_seconds: u64) -> Option<String> {
@@ -2449,8 +2502,16 @@ fn pair_row(pair: &insync_app::AppPair, model: &AppModel, compact: bool) -> Row<
             pair.id.clone(),
             enabled.to_string(),
             direction_label(pair.direction).to_string(),
-            compact_calendar_id(&pair.google_calendar_id),
-            compact_calendar_id(&pair.icloud_calendar_id),
+            compact_calendar_label(
+                pair.google_calendar_name.as_deref(),
+                pair.google_account_label.as_deref(),
+                &pair.google_calendar_id,
+            ),
+            compact_calendar_label(
+                pair.icloud_calendar_name.as_deref(),
+                pair.icloud_account_label.as_deref(),
+                &pair.icloud_calendar_id,
+            ),
         ]
     };
 
@@ -2459,27 +2520,100 @@ fn pair_row(pair: &insync_app::AppPair, model: &AppModel, compact: bool) -> Row<
 
 fn render_selected_pair(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     let lines = if let Some(pair) = model.selected_pair() {
-        vec![
-            Line::from(vec![Span::styled(
-                &pair.id,
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )]),
-            Line::from(format!(
-                "State: {}",
-                if pair.enabled { "enabled" } else { "disabled" }
-            )),
-            Line::from(format!("Direction: {}", direction_label(pair.direction))),
-            Line::from(format!(
-                "Google: {}",
-                compact_detail_value(&pair.google_calendar_id, area.width)
-            )),
-            Line::from(format!(
-                "iCloud: {}",
-                compact_detail_value(&pair.icloud_calendar_id, area.width)
-            )),
-        ]
+        if area.height < 9 {
+            vec![
+                Line::from(vec![Span::styled(
+                    &pair.id,
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )]),
+                Line::from(format!(
+                    "{} / {}",
+                    if pair.enabled { "enabled" } else { "disabled" },
+                    direction_label(pair.direction)
+                )),
+                Line::from(format!(
+                    "Google: {}",
+                    compact_detail_value(
+                        &calendar_detail_label(
+                            pair.google_calendar_name.as_deref(),
+                            pair.google_account_label.as_deref(),
+                            &pair.google_calendar_id,
+                        ),
+                        area.width
+                    )
+                )),
+                Line::from(format!(
+                    "iCloud: {}",
+                    compact_detail_value(
+                        &calendar_detail_label(
+                            pair.icloud_calendar_name.as_deref(),
+                            pair.icloud_account_label.as_deref(),
+                            &pair.icloud_calendar_id,
+                        ),
+                        area.width
+                    )
+                )),
+                Line::from(format!(
+                    "Sync: G {} / I {}",
+                    pair.google_last_sync_at.as_deref().unwrap_or("never"),
+                    pair.icloud_last_sync_at.as_deref().unwrap_or("never")
+                )),
+            ]
+        } else {
+            vec![
+                Line::from(vec![Span::styled(
+                    &pair.id,
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )]),
+                Line::from(format!(
+                    "State: {}",
+                    if pair.enabled { "enabled" } else { "disabled" }
+                )),
+                Line::from(format!("Direction: {}", direction_label(pair.direction))),
+                Line::from(format!(
+                    "Google: {}",
+                    compact_detail_value(
+                        &calendar_detail_label(
+                            pair.google_calendar_name.as_deref(),
+                            pair.google_account_label.as_deref(),
+                            &pair.google_calendar_id,
+                        ),
+                        area.width
+                    )
+                )),
+                Line::from(format!(
+                    "Google ID: {}",
+                    compact_detail_value(&pair.google_calendar_id, area.width)
+                )),
+                Line::from(format!(
+                    "Google sync: {}",
+                    pair.google_last_sync_at.as_deref().unwrap_or("never")
+                )),
+                Line::from(format!(
+                    "iCloud: {}",
+                    compact_detail_value(
+                        &calendar_detail_label(
+                            pair.icloud_calendar_name.as_deref(),
+                            pair.icloud_account_label.as_deref(),
+                            &pair.icloud_calendar_id,
+                        ),
+                        area.width
+                    )
+                )),
+                Line::from(format!(
+                    "iCloud ID: {}",
+                    compact_detail_value(&pair.icloud_calendar_id, area.width)
+                )),
+                Line::from(format!(
+                    "iCloud sync: {}",
+                    pair.icloud_last_sync_at.as_deref().unwrap_or("never")
+                )),
+            ]
+        }
     } else {
         vec![
             Line::from("No calendar pairs configured."),
@@ -2622,9 +2756,18 @@ fn direction_label(direction: insync_core::SyncDirection) -> &'static str {
     }
 }
 
-fn compact_calendar_id(value: &str) -> String {
-    const MAX: usize = 28;
-    compact_string(value, MAX)
+fn compact_calendar_label(name: Option<&str>, account: Option<&str>, fallback_id: &str) -> String {
+    compact_string(&calendar_detail_label(name, account, fallback_id), 28)
+}
+
+fn calendar_detail_label(name: Option<&str>, account: Option<&str>, fallback_id: &str) -> String {
+    let label = name
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(fallback_id);
+    match account.filter(|value| !value.trim().is_empty()) {
+        Some(account) => format!("{label} [{account}]"),
+        None => label.to_string(),
+    }
 }
 
 fn compact_detail_value(value: &str, area_width: u16) -> String {

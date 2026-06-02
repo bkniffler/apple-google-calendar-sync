@@ -141,6 +141,17 @@ insync setup \
 Use `--force` to replace an existing pair with the same ID. Directions are
 `two-way`, `google-to-icloud`, and `icloud-to-google`.
 
+## Terminal Dashboard
+
+```bash
+insync tui
+```
+
+The TUI shows sync health, unresolved conflicts, recent run status, configured
+pairs, cached provider calendar names/accounts, raw calendar IDs, and per-side
+last sync timestamps from SQLite. Calendar names are populated after setup
+discovery or `insync db calendars` has cached provider metadata.
+
 ## Sync
 
 ```bash

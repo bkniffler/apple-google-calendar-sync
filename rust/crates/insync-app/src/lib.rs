@@ -22,6 +22,12 @@ pub struct AppPair {
     pub direction: SyncDirection,
     pub google_calendar_id: String,
     pub icloud_calendar_id: String,
+    pub google_calendar_name: Option<String>,
+    pub icloud_calendar_name: Option<String>,
+    pub google_account_label: Option<String>,
+    pub icloud_account_label: Option<String>,
+    pub google_last_sync_at: Option<String>,
+    pub icloud_last_sync_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -31,6 +37,18 @@ pub struct AppRuntimeSnapshot {
     pub last_run_status: Option<String>,
     pub next_run_at: Option<String>,
     pub recent_error: Option<String>,
+    pub pairs: Vec<AppPairRuntimeSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppPairRuntimeSnapshot {
+    pub pair_id: String,
+    pub google_calendar_name: Option<String>,
+    pub icloud_calendar_name: Option<String>,
+    pub google_account_label: Option<String>,
+    pub icloud_account_label: Option<String>,
+    pub google_last_sync_at: Option<String>,
+    pub icloud_last_sync_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,6 +106,12 @@ impl AppModel {
                     direction: pair.direction,
                     google_calendar_id: pair.google_calendar_id.clone(),
                     icloud_calendar_id: pair.icloud_calendar_id.clone(),
+                    google_calendar_name: None,
+                    icloud_calendar_name: None,
+                    google_account_label: None,
+                    icloud_account_label: None,
+                    google_last_sync_at: None,
+                    icloud_last_sync_at: None,
                 })
                 .collect(),
         }
@@ -108,6 +132,20 @@ impl AppModel {
         self.last_run_status = snapshot.last_run_status;
         self.next_run_at = snapshot.next_run_at;
         self.recent_error = snapshot.recent_error;
+        for pair_snapshot in snapshot.pairs {
+            if let Some(pair) = self
+                .pairs
+                .iter_mut()
+                .find(|pair| pair.id == pair_snapshot.pair_id)
+            {
+                pair.google_calendar_name = pair_snapshot.google_calendar_name;
+                pair.icloud_calendar_name = pair_snapshot.icloud_calendar_name;
+                pair.google_account_label = pair_snapshot.google_account_label;
+                pair.icloud_account_label = pair_snapshot.icloud_account_label;
+                pair.google_last_sync_at = pair_snapshot.google_last_sync_at;
+                pair.icloud_last_sync_at = pair_snapshot.icloud_last_sync_at;
+            }
+        }
     }
 
     pub fn select_next_pair(&mut self) {
@@ -213,6 +251,12 @@ mod tests {
                     direction: SyncDirection::TwoWay,
                     google_calendar_id: "ga".to_string(),
                     icloud_calendar_id: "ia".to_string(),
+                    google_calendar_name: None,
+                    icloud_calendar_name: None,
+                    google_account_label: None,
+                    icloud_account_label: None,
+                    google_last_sync_at: None,
+                    icloud_last_sync_at: None,
                 },
                 AppPair {
                     id: "b".to_string(),
@@ -220,6 +264,12 @@ mod tests {
                     direction: SyncDirection::LeftToRight,
                     google_calendar_id: "gb".to_string(),
                     icloud_calendar_id: "ib".to_string(),
+                    google_calendar_name: None,
+                    icloud_calendar_name: None,
+                    google_account_label: None,
+                    icloud_account_label: None,
+                    google_last_sync_at: None,
+                    icloud_last_sync_at: None,
                 },
             ],
         };
@@ -250,11 +300,59 @@ mod tests {
             last_run_status: Some("failed".to_string()),
             next_run_at: Some("2026-06-02 12:05:00".to_string()),
             recent_error: Some("auth failed".to_string()),
+            pairs: Vec::new(),
         });
 
         assert_eq!(model.conflict_count, 3);
         assert_eq!(model.last_run_status.as_deref(), Some("failed"));
         assert_eq!(model.next_run_at.as_deref(), Some("2026-06-02 12:05:00"));
         assert_eq!(model.recent_error.as_deref(), Some("auth failed"));
+    }
+
+    #[test]
+    fn runtime_snapshot_updates_pair_metadata() {
+        let mut model = AppModel {
+            status: AppStatus::Idle,
+            selected_pair_id: Some("a".to_string()),
+            conflict_count: 0,
+            last_message: None,
+            last_run_at: None,
+            last_run_status: None,
+            next_run_at: None,
+            recent_error: None,
+            pairs: vec![AppPair {
+                id: "a".to_string(),
+                enabled: true,
+                direction: SyncDirection::TwoWay,
+                google_calendar_id: "ga".to_string(),
+                icloud_calendar_id: "ia".to_string(),
+                google_calendar_name: None,
+                icloud_calendar_name: None,
+                google_account_label: None,
+                icloud_account_label: None,
+                google_last_sync_at: None,
+                icloud_last_sync_at: None,
+            }],
+        };
+
+        model.apply_runtime_snapshot(AppRuntimeSnapshot {
+            pairs: vec![AppPairRuntimeSnapshot {
+                pair_id: "a".to_string(),
+                google_calendar_name: Some("Work".to_string()),
+                icloud_calendar_name: Some("Home".to_string()),
+                google_account_label: Some("me@example.com".to_string()),
+                icloud_account_label: Some("me@icloud.com".to_string()),
+                google_last_sync_at: Some("2026-06-02 12:00:00".to_string()),
+                icloud_last_sync_at: Some("2026-06-02 12:01:00".to_string()),
+            }],
+            ..AppRuntimeSnapshot::default()
+        });
+
+        let pair = model.selected_pair().unwrap();
+        assert_eq!(pair.google_calendar_name.as_deref(), Some("Work"));
+        assert_eq!(
+            pair.icloud_last_sync_at.as_deref(),
+            Some("2026-06-02 12:01:00")
+        );
     }
 }

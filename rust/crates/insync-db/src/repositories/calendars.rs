@@ -22,6 +22,10 @@ pub struct CalendarRow {
     pub timezone: Option<String>,
     pub writable: bool,
     pub raw_json: Option<String>,
+    pub provider_sync_token: Option<String>,
+    pub last_full_sync_at: Option<String>,
+    pub last_incremental_sync_at: Option<String>,
+    pub sync_state_updated_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -62,10 +66,15 @@ pub fn list_calendars(conn: &Connection) -> Result<Vec<CalendarRow>, DbError> {
           calendars.timezone,
           calendars.writable,
           calendars.raw_json,
+          sync_state.provider_sync_token,
+          sync_state.last_full_sync_at,
+          sync_state.last_incremental_sync_at,
+          sync_state.updated_at,
           calendars.created_at,
           calendars.updated_at
         FROM calendars
         JOIN accounts ON accounts.id = calendars.account_id
+        LEFT JOIN sync_state ON sync_state.calendar_id = calendars.id
         ORDER BY accounts.provider, accounts.email, calendars.name, calendars.provider_calendar_id
         "#,
     )?;
@@ -83,8 +92,12 @@ pub fn list_calendars(conn: &Connection) -> Result<Vec<CalendarRow>, DbError> {
                 timezone: row.get(7)?,
                 writable: row.get::<_, i64>(8)? != 0,
                 raw_json: row.get(9)?,
-                created_at: row.get(10)?,
-                updated_at: row.get(11)?,
+                provider_sync_token: row.get(10)?,
+                last_full_sync_at: row.get(11)?,
+                last_incremental_sync_at: row.get(12)?,
+                sync_state_updated_at: row.get(13)?,
+                created_at: row.get(14)?,
+                updated_at: row.get(15)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?)
