@@ -8,6 +8,7 @@ import {
   loadEventLinks,
   loadUnresolvedConflictUids,
   recordConflict,
+  resolveStaleConflicts,
   seedConfiguredPairs,
   updateCalendarSyncToken,
   upsertEventLink,
@@ -85,6 +86,20 @@ export class SyncRunner {
         await this.applyAction(pair.id, pair.googleCalendarId, pair.icloudCalendarId, action);
       }
 
+      if (!dryRun) {
+        const resolved = resolveStaleConflicts(db, {
+          syncPairId: pair.id,
+          active: actions.flatMap((action) =>
+            action.kind === "conflict"
+              ? [{ canonicalUid: action.canonicalUid, reason: action.reason }]
+              : []
+          )
+        });
+        if (resolved > 0) {
+          logger.info({ pairId: pair.id, resolved }, "resolved stale conflicts");
+        }
+      }
+
       updateCalendarSyncToken(db, calendarIds.googleCalendarId, googleChanges.syncToken);
       updateCalendarSyncToken(db, calendarIds.icloudCalendarId, icloudChanges.syncToken);
     }
@@ -107,6 +122,10 @@ export class SyncRunner {
     const { db, google, icloud, logger } = this.options;
     const dryRun = this.options.dryRun ?? true;
 
+    if (!dryRun && action.kind === "conflict" && action.resolution === "ignored") {
+      return;
+    }
+
     if (!dryRun && action.kind !== "snapshot") {
       logger.info(
         {
@@ -128,10 +147,6 @@ export class SyncRunner {
     }
 
     if (action.kind === "conflict") {
-      if (action.resolution === "ignored") {
-        return;
-      }
-
       recordConflict(db, {
         syncPairId,
         eventLinkId: action.link?.id,

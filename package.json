@@ -9,6 +9,7 @@
     "auth:google": "bun src/index.ts auth google",
     "calendars:google": "bun src/index.ts calendars google",
     "calendars:icloud": "bun src/index.ts calendars icloud",
+    "conflicts": "bun src/index.ts conflicts",
     "doctor": "bun src/index.ts doctor",
     "migrate": "bun src/index.ts migrate",
     "sync": "bun src/index.ts sync --once",

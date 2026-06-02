@@ -325,6 +325,22 @@ export function recordConflict(
     icloudSnapshot?: unknown | undefined;
   }
 ): void {
+  const existing = db
+    .query<{ id: string }, [string, string, string]>(
+      `SELECT id
+      FROM sync_conflicts
+      WHERE sync_pair_id = ?
+        AND canonical_uid = ?
+        AND reason = ?
+        AND resolved_at IS NULL
+      LIMIT 1`
+    )
+    .get(input.syncPairId, input.canonicalUid, input.reason);
+
+  if (existing) {
+    return;
+  }
+
   db.query(
     `INSERT INTO sync_conflicts (
       id,
@@ -364,4 +380,143 @@ export function loadUnresolvedConflictUids(
     .all(syncPairId, reason);
 
   return new Set(rows.flatMap((row) => (row.canonical_uid ? [row.canonical_uid] : [])));
+}
+
+export type UnresolvedConflictSummary = {
+  sync_pair_id: string;
+  reason: string;
+  count: number;
+  first_seen_at: string;
+  last_seen_at: string;
+};
+
+export type UnresolvedConflictRow = {
+  id: string;
+  sync_pair_id: string;
+  canonical_uid: string | null;
+  reason: string;
+  created_at: string;
+};
+
+export function listUnresolvedConflictSummaries(db: AppDatabase): UnresolvedConflictSummary[] {
+  return db
+    .query<UnresolvedConflictSummary, []>(
+      `SELECT
+        sync_pair_id,
+        reason,
+        COUNT(*) AS count,
+        MIN(created_at) AS first_seen_at,
+        MAX(created_at) AS last_seen_at
+      FROM sync_conflicts
+      WHERE resolved_at IS NULL
+      GROUP BY sync_pair_id, reason
+      ORDER BY sync_pair_id, reason`
+    )
+    .all();
+}
+
+export function listUnresolvedConflicts(
+  db: AppDatabase,
+  input: {
+    syncPairId?: string | undefined;
+    reason?: string | undefined;
+    limit?: number | undefined;
+  } = {}
+): UnresolvedConflictRow[] {
+  const clauses = ["resolved_at IS NULL"];
+  const params: (string | number)[] = [];
+
+  if (input.syncPairId) {
+    clauses.push("sync_pair_id = ?");
+    params.push(input.syncPairId);
+  }
+
+  if (input.reason) {
+    clauses.push("reason = ?");
+    params.push(input.reason);
+  }
+
+  params.push(input.limit ?? 100);
+
+  return db
+    .query<UnresolvedConflictRow, (string | number)[]>(
+      `SELECT
+        id,
+        sync_pair_id,
+        canonical_uid,
+        reason,
+        created_at
+      FROM sync_conflicts
+      WHERE ${clauses.join(" AND ")}
+      ORDER BY created_at DESC
+      LIMIT ?`
+    )
+    .all(...params);
+}
+
+export function dedupeUnresolvedConflicts(db: AppDatabase): number {
+  const rows = db
+    .query<{ id: string }, []>(
+      `SELECT id
+      FROM (
+        SELECT
+          id,
+          ROW_NUMBER() OVER (
+            PARTITION BY sync_pair_id, canonical_uid, reason
+            ORDER BY created_at ASC, id ASC
+          ) AS duplicate_rank
+        FROM sync_conflicts
+        WHERE resolved_at IS NULL
+      )
+      WHERE duplicate_rank > 1`
+    )
+    .all();
+
+  if (rows.length === 0) {
+    return 0;
+  }
+
+  const update = db.query("UPDATE sync_conflicts SET resolved_at = CURRENT_TIMESTAMP WHERE id = ?");
+  db.transaction(() => {
+    for (const row of rows) {
+      update.run(row.id);
+    }
+  })();
+
+  return rows.length;
+}
+
+export function resolveStaleConflicts(
+  db: AppDatabase,
+  input: {
+    syncPairId: string;
+    active: Array<{ canonicalUid: string; reason: string }>;
+  }
+): number {
+  const rows = db
+    .query<{ id: string; canonical_uid: string | null; reason: string }, [string]>(
+      `SELECT id, canonical_uid, reason
+      FROM sync_conflicts
+      WHERE sync_pair_id = ?
+        AND resolved_at IS NULL`
+    )
+    .all(input.syncPairId);
+
+  const active = new Set(input.active.map((item) => `${item.canonicalUid}\0${item.reason}`));
+  const stale = rows.filter(
+    (row) => !row.canonical_uid || !active.has(`${row.canonical_uid}\0${row.reason}`)
+  );
+
+  if (stale.length === 0) {
+    return 0;
+  }
+
+  const update = db.query("UPDATE sync_conflicts SET resolved_at = CURRENT_TIMESTAMP WHERE id = ?");
+  db.transaction(() => {
+    for (const row of stale) {
+      update.run(row.id);
+    }
+  })();
+
+  return stale.length;
 }

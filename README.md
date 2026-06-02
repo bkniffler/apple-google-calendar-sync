@@ -10,7 +10,9 @@ bun run setup
 ```
 
 `setup` creates `insync.local.json` from `insync.example.json` when it does not
-exist, runs migrations, and checks the configured paths.
+exist. In an interactive terminal it can also guide you through credentials,
+OAuth, calendar discovery, and pair selection. In noninteractive environments it
+runs a config/database check.
 
 Edit `insync.local.json` with your provider settings and calendar pair:
 
@@ -164,11 +166,41 @@ bun run setup
 bun run auth:google
 bun run calendars:google
 bun run calendars:icloud
+bun run conflicts
 bun run doctor
 bun run migrate
 bun run sync:dry
 bun run sync:apply
 bun run sync:watch
+```
+
+## Conflicts
+
+Show unresolved conflict counts:
+
+```bash
+bun run conflicts
+```
+
+Show conflict details:
+
+```bash
+bun src/index.ts conflicts --details
+bun src/index.ts conflicts --details --reason both_sides_changed
+bun src/index.ts conflicts --details --pair personal --limit 50
+```
+
+Resolve duplicate unresolved records while keeping the first occurrence:
+
+```bash
+bun src/index.ts conflicts --dedupe
+```
+
+Write CSV output:
+
+```bash
+bun src/index.ts conflicts --csv .insync/reports/conflicts.csv
+bun src/index.ts conflicts --details --csv .insync/reports/conflict-details.csv
 ```
 
 ## Current Sync Behavior
