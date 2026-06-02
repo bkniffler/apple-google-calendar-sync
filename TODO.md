@@ -212,9 +212,9 @@ border.
 - [x] Keep all app actions expressed through `insync-app` events/effects.
 - [x] Define a small UI shell contract for status, actions, notifications, and
       setup entrypoints.
-- [ ] Investigate macOS menu-bar implementation options.
-- [ ] Investigate Windows tray implementation options.
-- [ ] Investigate Linux tray/AppIndicator practicality.
+- [x] Investigate macOS menu-bar implementation options.
+- [x] Investigate Windows tray implementation options.
+- [x] Investigate Linux tray/AppIndicator practicality.
 - [x] Support notifications for failed syncs and unresolved conflicts.
 - [x] Support safe quick actions: dry-run now, apply now, open conflicts, pause.
 

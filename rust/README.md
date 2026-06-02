@@ -65,6 +65,11 @@ The release-artifact workflow builds the `insync` CLI binary for Linux, macOS,
 and Windows on manual dispatch or `v*` tags. These are unsigned development
 artifacts until the final packaging path is decided.
 
+Future tray/menu-bar notes live in [`TRAY_UI.md`](TRAY_UI.md). The current
+recommendation is to add a separate `insync-tray` shell after Rust live parity,
+using Tauri v2 for a richer setup/conflict/report window or `tray-icon`
+directly only for a menu-only shell.
+
 ## Naming
 
 The user-facing binary name is `insync`. The Rust crate that owns that binary is
