@@ -48,6 +48,46 @@ pub struct AppRuntimeSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppShellSnapshot {
+    pub status: AppStatus,
+    pub view: AppView,
+    pub selected_pair_id: Option<String>,
+    pub conflict_count: usize,
+    pub enabled_pair_count: usize,
+    pub total_pair_count: usize,
+    pub last_run_at: Option<String>,
+    pub last_run_status: Option<String>,
+    pub next_run_at: Option<String>,
+    pub recent_error: Option<String>,
+    pub last_message: Option<String>,
+    pub actions: Vec<AppShellAction>,
+    pub notifications: Vec<AppShellNotification>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppShellAction {
+    pub command: AppCommand,
+    pub label: String,
+    pub description: String,
+    pub enabled: bool,
+    pub destructive: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppShellNotification {
+    pub severity: AppNotificationSeverity,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppNotificationSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppPairRuntimeSnapshot {
     pub pair_id: String,
     pub google_calendar_name: Option<String>,
@@ -125,6 +165,7 @@ pub enum AppEvent {
     CloseCommandPalette,
     SelectNextCommand,
     SelectPreviousCommand,
+    ExecuteCommand(AppCommand),
     ExecuteSelectedCommand,
     EngineFinished { message: String },
     EngineFailed { message: String },
@@ -207,6 +248,33 @@ impl AppModel {
             .get(self.selected_command_index)
             .copied()
             .unwrap_or(AppCommand::DryRun)
+    }
+
+    pub fn shell_snapshot(&self) -> AppShellSnapshot {
+        AppShellSnapshot {
+            status: self.status,
+            view: self.view,
+            selected_pair_id: self.selected_pair_id.clone(),
+            conflict_count: self.conflict_count,
+            enabled_pair_count: self.enabled_pair_count(),
+            total_pair_count: self.pairs.len(),
+            last_run_at: self.last_run_at.clone(),
+            last_run_status: self.last_run_status.clone(),
+            next_run_at: self.next_run_at.clone(),
+            recent_error: self.recent_error.clone(),
+            last_message: self.last_message.clone(),
+            actions: AppCommand::all()
+                .iter()
+                .map(|command| AppShellAction {
+                    command: *command,
+                    label: command.label().to_string(),
+                    description: command.description().to_string(),
+                    enabled: command.is_enabled(self),
+                    destructive: command.is_destructive(),
+                })
+                .collect(),
+            notifications: self.shell_notifications(),
+        }
     }
 
     pub fn apply_runtime_snapshot(&mut self, snapshot: AppRuntimeSnapshot) {
@@ -311,6 +379,7 @@ impl AppModel {
                 self.select_command_by_offset(-1);
                 Vec::new()
             }
+            AppEvent::ExecuteCommand(command) => self.execute_command(command),
             AppEvent::ExecuteSelectedCommand => {
                 self.command_palette_open = false;
                 self.execute_command(self.selected_command())
@@ -387,6 +456,9 @@ impl AppModel {
     }
 
     fn execute_command(&mut self, command: AppCommand) -> Vec<AppEffect> {
+        if !command.is_enabled(self) {
+            return Vec::new();
+        }
         match command {
             AppCommand::DryRun => self.update(AppEvent::StartDryRun),
             AppCommand::ApplyRun => self.update(AppEvent::StartApplyRun),
@@ -397,6 +469,29 @@ impl AppModel {
             AppCommand::ExportReport => vec![AppEffect::ExportDryRunReport],
             AppCommand::Quit => vec![AppEffect::Quit],
         }
+    }
+
+    fn shell_notifications(&self) -> Vec<AppShellNotification> {
+        let mut notifications = Vec::new();
+        if let Some(error) = self.recent_error.as_ref().filter(|error| !error.is_empty()) {
+            notifications.push(AppShellNotification {
+                severity: AppNotificationSeverity::Error,
+                message: error.clone(),
+            });
+        }
+        if self.conflict_count > 0 {
+            notifications.push(AppShellNotification {
+                severity: AppNotificationSeverity::Warning,
+                message: format!("{} unresolved conflict(s)", self.conflict_count),
+            });
+        }
+        if self.pairs.is_empty() {
+            notifications.push(AppShellNotification {
+                severity: AppNotificationSeverity::Info,
+                message: "No calendar pairs configured".to_string(),
+            });
+        }
+        notifications
     }
 }
 
@@ -440,6 +535,22 @@ impl AppCommand {
             Self::ExportReport => "Export the latest dry-run report",
             Self::Quit => "Close the terminal dashboard",
         }
+    }
+
+    pub fn is_enabled(self, model: &AppModel) -> bool {
+        match self {
+            Self::DryRun | Self::ApplyRun => model.enabled_pair_count() > 0,
+            Self::RefreshConflicts
+            | Self::OpenSetup
+            | Self::ShowPairs
+            | Self::ShowRuns
+            | Self::ExportReport
+            | Self::Quit => true,
+        }
+    }
+
+    pub fn is_destructive(self) -> bool {
+        matches!(self, Self::ApplyRun | Self::Quit)
     }
 }
 
@@ -738,5 +849,70 @@ mod tests {
 
         assert_eq!(model.view, AppView::Runs);
         assert_eq!(effects, Vec::<AppEffect>::new());
+    }
+
+    #[test]
+    fn shell_snapshot_exposes_actions_status_and_notifications() {
+        let mut model = AppModel {
+            status: AppStatus::Idle,
+            view: AppView::Dashboard,
+            command_palette_open: false,
+            selected_command_index: 0,
+            selected_pair_id: None,
+            selected_run_id: None,
+            run_filter: AppRunFilter::All,
+            conflict_count: 2,
+            last_message: Some("ready".to_string()),
+            last_run_at: Some("2026-06-02 12:00:00".to_string()),
+            last_run_status: Some("failed".to_string()),
+            next_run_at: Some("2026-06-02 12:05:00".to_string()),
+            recent_error: Some("auth failed".to_string()),
+            pairs: Vec::new(),
+            runs: Vec::new(),
+        };
+
+        let snapshot = model.shell_snapshot();
+
+        assert_eq!(snapshot.status, AppStatus::Idle);
+        assert_eq!(snapshot.conflict_count, 2);
+        assert_eq!(snapshot.enabled_pair_count, 0);
+        assert_eq!(snapshot.last_message.as_deref(), Some("ready"));
+        let dry_run = snapshot
+            .actions
+            .iter()
+            .find(|action| action.command == AppCommand::DryRun)
+            .unwrap();
+        assert!(!dry_run.enabled);
+        let apply = snapshot
+            .actions
+            .iter()
+            .find(|action| action.command == AppCommand::ApplyRun)
+            .unwrap();
+        assert!(apply.destructive);
+        let setup = snapshot
+            .actions
+            .iter()
+            .find(|action| action.command == AppCommand::OpenSetup)
+            .unwrap();
+        assert!(setup.enabled);
+        assert_eq!(
+            snapshot
+                .notifications
+                .iter()
+                .map(|notification| notification.severity)
+                .collect::<Vec<_>>(),
+            vec![
+                AppNotificationSeverity::Error,
+                AppNotificationSeverity::Warning,
+                AppNotificationSeverity::Info
+            ]
+        );
+
+        let effects = model.update(AppEvent::ExecuteCommand(AppCommand::DryRun));
+        assert!(effects.is_empty());
+        assert_eq!(model.status, AppStatus::Idle);
+
+        let effects = model.update(AppEvent::ExecuteCommand(AppCommand::OpenSetup));
+        assert_eq!(effects, vec![AppEffect::ShowSetup]);
     }
 }

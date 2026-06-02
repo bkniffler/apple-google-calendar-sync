@@ -192,7 +192,7 @@ border.
 - [x] Add responsive layouts for narrow terminals and wide terminals.
 - [x] Add snapshot tests or golden rendering tests for key TUI screens where
       practical.
-- [ ] Keep the TUI connected to `insync-app` events/effects so a future
+- [x] Keep the TUI connected to `insync-app` events/effects so a future
       taskbar/menu-bar shell can reuse the same control model.
 
 ## 12. Background Running
@@ -209,8 +209,8 @@ border.
 
 ## 13. Future Taskbar/Menu-Bar UI
 
-- [ ] Keep all app actions expressed through `insync-app` events/effects.
-- [ ] Define a small UI shell contract for status, actions, notifications, and
+- [x] Keep all app actions expressed through `insync-app` events/effects.
+- [x] Define a small UI shell contract for status, actions, notifications, and
       setup entrypoints.
 - [ ] Investigate macOS menu-bar implementation options.
 - [ ] Investigate Windows tray implementation options.

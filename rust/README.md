@@ -157,7 +157,9 @@ yellow warnings/conflicts, and red failures or destructive actions. Press `:`
 inside the TUI to open the command palette for dry-run, apply, conflict refresh,
 setup, view switching, report export, and quit actions. The key dashboard, run
 history, and command-palette screens have buffer-level render tests to catch
-layout regressions.
+layout regressions. The TUI drives commands through `insync-app` events/effects,
+and `insync-app` exposes a shell snapshot with status, actions, and
+notifications for future tray or menu-bar shells.
 
 ## Sync
 

@@ -8,7 +8,7 @@ use crossterm::{
 };
 use insync_app::{
     AppCommand, AppEffect, AppEvent, AppModel, AppPairRuntimeSnapshot, AppRun, AppRunFilter,
-    AppRuntimeSnapshot, AppStatus, AppView,
+    AppRuntimeSnapshot, AppShellAction, AppStatus, AppView,
 };
 use insync_config::{
     LOCAL_CONFIG_FILE, SecretStoreKind, SyncPairConfig, app_config_path,
@@ -2410,25 +2410,26 @@ fn run_tui(mut model: AppModel) -> Result<()> {
                         model.update(AppEvent::CycleRunFilter);
                     }
                     KeyCode::Char('d') => {
-                        let effects = model.update(AppEvent::StartDryRun);
+                        let effects = model.update(AppEvent::ExecuteCommand(AppCommand::DryRun));
                         if apply_tui_effects(&mut model, effects) {
                             break Ok(());
                         }
                     }
                     KeyCode::Char('a') => {
-                        let effects = model.update(AppEvent::StartApplyRun);
+                        let effects = model.update(AppEvent::ExecuteCommand(AppCommand::ApplyRun));
                         if apply_tui_effects(&mut model, effects) {
                             break Ok(());
                         }
                     }
                     KeyCode::Char('r') => {
-                        let effects = model.update(AppEvent::RefreshConflicts);
+                        let effects =
+                            model.update(AppEvent::ExecuteCommand(AppCommand::RefreshConflicts));
                         if apply_tui_effects(&mut model, effects) {
                             break Ok(());
                         }
                     }
                     KeyCode::Char('s') => {
-                        let effects = model.update(AppEvent::OpenSetup);
+                        let effects = model.update(AppEvent::ExecuteCommand(AppCommand::OpenSetup));
                         if apply_tui_effects(&mut model, effects) {
                             break Ok(());
                         }
@@ -3223,11 +3224,13 @@ fn render_command_bar(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
 fn render_command_palette(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     let area = centered_rect(72, 58, area);
     frame.render_widget(Clear, area);
+    let shell = model.shell_snapshot();
 
-    let commands = AppCommand::all()
+    let commands = shell
+        .actions
         .iter()
         .enumerate()
-        .map(|(index, command)| command_palette_item(index, *command, model))
+        .map(|(index, action)| command_palette_item(index, action, model))
         .collect::<Vec<_>>();
 
     let help = Line::from(vec![
@@ -3270,13 +3273,19 @@ fn render_command_palette(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     );
 }
 
-fn command_palette_item(index: usize, command: AppCommand, model: &AppModel) -> ListItem<'static> {
+fn command_palette_item(
+    index: usize,
+    action: &AppShellAction,
+    model: &AppModel,
+) -> ListItem<'static> {
     let selected = index == model.selected_command_index;
     let marker = if selected { ">" } else { " " };
     let style = if selected {
         Style::default()
-            .fg(command_color(command))
+            .fg(command_color(action.command))
             .add_modifier(Modifier::BOLD)
+    } else if !action.enabled {
+        Style::default().fg(color_muted())
     } else {
         Style::default().fg(Color::White)
     };
@@ -3284,10 +3293,10 @@ fn command_palette_item(index: usize, command: AppCommand, model: &AppModel) -> 
     ListItem::new(Line::from(vec![
         Span::styled(marker.to_string(), style),
         Span::raw(" "),
-        Span::styled(compact_string(command.label(), 20), style),
+        Span::styled(compact_string(&action.label, 20), style),
         Span::raw("  "),
         Span::styled(
-            compact_string(command.description(), 56),
+            compact_string(&action.description, 56),
             Style::default().fg(color_muted()),
         ),
     ]))
