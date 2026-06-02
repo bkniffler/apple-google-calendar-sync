@@ -839,6 +839,7 @@ mod tests {
         ProviderEventMeta, ProviderName, RecurrenceData,
     };
     use chrono::{TimeZone, Utc};
+    use serde::Deserialize;
 
     fn event(uid: &str, title: &str) -> CanonicalEvent {
         CanonicalEvent {
@@ -918,6 +919,285 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PlannerParityFixture {
+        initial_cases: Vec<InitialFixtureCase>,
+        two_way_cases: Vec<TwoWayFixtureCase>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct InitialFixtureCase {
+        name: String,
+        google_events: Vec<EventSpec>,
+        icloud_events: Vec<EventSpec>,
+        expected: Vec<ActionSummary>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TwoWayFixtureCase {
+        name: String,
+        direction: SyncDirection,
+        conflict_policy: FixtureConflictPolicy,
+        #[serde(default, rename = "knownICloudUidCollisions")]
+        known_icloud_uid_collisions: Vec<String>,
+        links: Vec<LinkSpec>,
+        google_events: Vec<EventSpec>,
+        icloud_events: Vec<EventSpec>,
+        expected: Vec<ActionSummary>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct FixtureConflictPolicy {
+        both_sides_changed: ConflictPolicy,
+        unlinked_same_uid: ConflictPolicy,
+        delete_vs_update: DeleteConflictPolicy,
+        icloud_uid_collision: UidCollisionPolicy,
+    }
+
+    impl From<&FixtureConflictPolicy> for PlannerConflictPolicies {
+        fn from(value: &FixtureConflictPolicy) -> Self {
+            Self {
+                both_sides_changed: value.both_sides_changed,
+                unlinked_same_uid: value.unlinked_same_uid,
+                delete_vs_update: value.delete_vs_update,
+                icloud_uid_collision: value.icloud_uid_collision,
+            }
+        }
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct EventSpec {
+        uid: String,
+        title: String,
+        updated_at: Option<String>,
+        #[serde(default)]
+        deleted: bool,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct LinkSpec {
+        uid: String,
+        google_hash: Option<String>,
+        icloud_hash: Option<String>,
+    }
+
+    #[derive(Debug, PartialEq, Eq, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ActionSummary {
+        kind: String,
+        canonical_uid: String,
+        #[serde(default)]
+        reason: Option<String>,
+        #[serde(default)]
+        resolution: Option<String>,
+        #[serde(default)]
+        policy: Option<String>,
+        #[serde(default)]
+        event_title: Option<String>,
+    }
+
+    fn planner_parity_fixture() -> PlannerParityFixture {
+        serde_json::from_str(include_str!(
+            "../../../../test-fixtures/planner-parity.json"
+        ))
+        .expect("planner parity fixture should parse")
+    }
+
+    fn fixture_event(provider: ProviderName, spec: &EventSpec) -> CanonicalEvent {
+        CanonicalEvent {
+            canonical_uid: spec.uid.clone(),
+            title: spec.title.clone(),
+            description: None,
+            location: None,
+            status: EventStatus::Confirmed,
+            visibility: EventVisibility::Default,
+            start: EventDateTime::DateTime {
+                value: Utc.with_ymd_and_hms(2026, 6, 1, 12, 0, 0).unwrap(),
+                timezone: Some("UTC".to_string()),
+            },
+            end: EventDateTime::DateTime {
+                value: Utc.with_ymd_and_hms(2026, 6, 1, 13, 0, 0).unwrap(),
+                timezone: Some("UTC".to_string()),
+            },
+            recurrence: None,
+            attendees: Vec::new(),
+            reminders: Vec::new(),
+            provider_meta: ProviderEventMeta {
+                provider,
+                calendar_id: match provider {
+                    ProviderName::Google => "primary",
+                    ProviderName::Icloud => "icloud-calendar",
+                }
+                .to_string(),
+                event_id: match provider {
+                    ProviderName::Google => Some(spec.uid.clone()),
+                    ProviderName::Icloud => None,
+                },
+                href: match provider {
+                    ProviderName::Google => None,
+                    ProviderName::Icloud => Some(format!(
+                        "https://caldav.icloud.com/calendars/example/{}.ics",
+                        spec.uid
+                    )),
+                },
+                etag: Some(format!("{provider}-etag-{}", spec.uid)),
+                ical_uid: Some(spec.uid.clone()),
+                updated_at: spec.updated_at.as_ref().map(|value| {
+                    chrono::DateTime::parse_from_rfc3339(value)
+                        .unwrap()
+                        .with_timezone(&Utc)
+                }),
+                deleted: spec.deleted,
+            },
+            raw: serde_json::json!({}),
+        }
+    }
+
+    fn fixture_link(
+        spec: &LinkSpec,
+        google_events: &[CanonicalEvent],
+        icloud_events: &[CanonicalEvent],
+    ) -> EventLink {
+        EventLink {
+            id: format!("link-{}", spec.uid),
+            sync_pair_id: "personal".to_string(),
+            canonical_uid: spec.uid.clone(),
+            google_event_id: Some(spec.uid.clone()),
+            google_ical_uid: Some(spec.uid.clone()),
+            google_etag: Some("old-google-etag".to_string()),
+            icloud_href: Some(format!(
+                "https://caldav.icloud.com/calendars/example/{}.ics",
+                spec.uid
+            )),
+            icloud_uid: Some(spec.uid.clone()),
+            icloud_etag: Some("old-icloud-etag".to_string()),
+            google_hash: resolve_fixture_hash(
+                spec.google_hash.as_deref(),
+                "google",
+                google_events,
+                icloud_events,
+            ),
+            icloud_hash: resolve_fixture_hash(
+                spec.icloud_hash.as_deref(),
+                "icloud",
+                google_events,
+                icloud_events,
+            ),
+            last_synced_hash: Some("old-hash".to_string()),
+            deleted_google_at: None,
+            deleted_icloud_at: None,
+        }
+    }
+
+    fn resolve_fixture_hash(
+        value: Option<&str>,
+        side: &str,
+        google_events: &[CanonicalEvent],
+        icloud_events: &[CanonicalEvent],
+    ) -> Option<String> {
+        let value = value?;
+        let prefix = format!("$hash:{side}:");
+        if !value.starts_with(&prefix) {
+            return Some(value.to_string());
+        }
+
+        let uid = value.trim_start_matches(&prefix);
+        let events = if side == "google" {
+            google_events
+        } else {
+            icloud_events
+        };
+        let event = events
+            .iter()
+            .find(|event| event.canonical_uid == uid)
+            .unwrap_or_else(|| panic!("missing {side} fixture event for hash placeholder {value}"));
+        Some(hash_canonical_event(event))
+    }
+
+    fn action_summary(action: &PlannedAction) -> ActionSummary {
+        let (kind, canonical_uid, event, auto_resolution) = match action {
+            PlannedAction::Snapshot { canonical_uid, .. } => {
+                ("snapshot", canonical_uid, None, None)
+            }
+            PlannedAction::Noop { canonical_uid, .. } => ("noop", canonical_uid, None, None),
+            PlannedAction::CreateGoogle(action) => (
+                "create_google",
+                &action.canonical_uid,
+                Some(action.event.as_ref()),
+                action.resolution.as_ref(),
+            ),
+            PlannedAction::CreateIcloud(action) => (
+                "create_icloud",
+                &action.canonical_uid,
+                Some(action.event.as_ref()),
+                action.resolution.as_ref(),
+            ),
+            PlannedAction::UpdateGoogle(action) => (
+                "update_google",
+                &action.canonical_uid,
+                Some(action.event.as_ref()),
+                action.resolution.as_ref(),
+            ),
+            PlannedAction::UpdateIcloud(action) => (
+                "update_icloud",
+                &action.canonical_uid,
+                Some(action.event.as_ref()),
+                action.resolution.as_ref(),
+            ),
+            PlannedAction::DeleteGoogle(action) => (
+                "delete_google",
+                &action.canonical_uid,
+                Some(action.event.as_ref()),
+                action.resolution.as_ref(),
+            ),
+            PlannedAction::DeleteIcloud(action) => (
+                "delete_icloud",
+                &action.canonical_uid,
+                Some(action.event.as_ref()),
+                action.resolution.as_ref(),
+            ),
+            PlannedAction::Conflict {
+                canonical_uid,
+                reason,
+                resolution,
+                ..
+            } => {
+                return ActionSummary {
+                    kind: "conflict".to_string(),
+                    canonical_uid: canonical_uid.clone(),
+                    reason: Some(reason.clone()),
+                    resolution: Some(
+                        match resolution {
+                            ConflictResolution::Manual => "manual",
+                            ConflictResolution::Ignored => "ignored",
+                        }
+                        .to_string(),
+                    ),
+                    policy: None,
+                    event_title: None,
+                };
+            }
+        };
+
+        ActionSummary {
+            kind: kind.to_string(),
+            canonical_uid: canonical_uid.clone(),
+            reason: match action {
+                PlannedAction::Noop { reason, .. } => Some(reason.clone()),
+                _ => auto_resolution.map(|resolution| resolution.reason.clone()),
+            },
+            resolution: auto_resolution.map(|_| "auto_resolved".to_string()),
+            policy: auto_resolution.map(|resolution| resolution.policy.clone()),
+            event_title: event.map(|event| event.title.clone()),
+        }
+    }
+
     #[test]
     fn initial_sync_creates_missing_sides() {
         let google = event("shared-uid", "Lunch");
@@ -937,6 +1217,66 @@ mod tests {
         let actions = plan_initial_actions(&[google], &[icloud]);
 
         assert!(matches!(actions[0], PlannedAction::Noop { .. }));
+    }
+
+    #[test]
+    fn planner_matches_shared_initial_parity_fixtures() {
+        for item in planner_parity_fixture().initial_cases {
+            let google_events = item
+                .google_events
+                .iter()
+                .map(|event| fixture_event(ProviderName::Google, event))
+                .collect::<Vec<_>>();
+            let icloud_events = item
+                .icloud_events
+                .iter()
+                .map(|event| fixture_event(ProviderName::Icloud, event))
+                .collect::<Vec<_>>();
+            let actions = plan_initial_actions(&google_events, &icloud_events)
+                .iter()
+                .map(action_summary)
+                .collect::<Vec<_>>();
+
+            assert_eq!(actions, item.expected, "initial fixture: {}", item.name);
+        }
+    }
+
+    #[test]
+    fn planner_matches_shared_two_way_parity_fixtures() {
+        for item in planner_parity_fixture().two_way_cases {
+            let google_events = item
+                .google_events
+                .iter()
+                .map(|event| fixture_event(ProviderName::Google, event))
+                .collect::<Vec<_>>();
+            let icloud_events = item
+                .icloud_events
+                .iter()
+                .map(|event| fixture_event(ProviderName::Icloud, event))
+                .collect::<Vec<_>>();
+            let links = item
+                .links
+                .iter()
+                .map(|link| fixture_link(link, &google_events, &icloud_events))
+                .collect::<Vec<_>>();
+            let actions = plan_two_way_actions(PlanTwoWayInput {
+                links: &links,
+                google_events: &google_events,
+                icloud_events: &icloud_events,
+                known_icloud_uid_collisions: item
+                    .known_icloud_uid_collisions
+                    .iter()
+                    .cloned()
+                    .collect(),
+                direction: item.direction,
+                conflict_policy: PlannerConflictPolicies::from(&item.conflict_policy),
+            })
+            .iter()
+            .map(action_summary)
+            .collect::<Vec<_>>();
+
+            assert_eq!(actions, item.expected, "two-way fixture: {}", item.name);
+        }
     }
 
     #[test]
@@ -1022,6 +1362,39 @@ mod tests {
             response_status: Some("accepted".to_string()),
             optional: false,
         }];
+
+        assert_eq!(hash_canonical_event(&google), hash_canonical_event(&icloud));
+    }
+
+    #[test]
+    fn hash_ignores_timezone_labels_when_instants_match() {
+        let mut google = event("shared-uid", "Flight");
+        google.start = EventDateTime::DateTime {
+            value: chrono::DateTime::parse_from_rfc3339("2025-03-19T16:55:00.000Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            timezone: Some("UTC".to_string()),
+        };
+        google.end = EventDateTime::DateTime {
+            value: chrono::DateTime::parse_from_rfc3339("2025-03-19T19:20:00.000Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            timezone: Some("UTC".to_string()),
+        };
+
+        let mut icloud = event("shared-uid", "Flight");
+        icloud.start = EventDateTime::DateTime {
+            value: chrono::DateTime::parse_from_rfc3339("2025-03-19T17:55:00+01:00")
+                .unwrap()
+                .with_timezone(&Utc),
+            timezone: Some("GMT+0100".to_string()),
+        };
+        icloud.end = EventDateTime::DateTime {
+            value: chrono::DateTime::parse_from_rfc3339("2025-03-19T20:20:00+01:00")
+                .unwrap()
+                .with_timezone(&Utc),
+            timezone: Some("GMT+0100".to_string()),
+        };
 
         assert_eq!(hash_canonical_event(&google), hash_canonical_event(&icloud));
     }

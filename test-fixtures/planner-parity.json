@@ -1,0 +1,294 @@
+{
+  "initialCases": [
+    {
+      "name": "creates missing event on the opposite provider",
+      "googleEvents": [{ "uid": "shared-uid", "title": "Lunch" }],
+      "icloudEvents": [{ "uid": "icloud-only", "title": "Dentist" }],
+      "expected": [
+        { "kind": "create_icloud", "canonicalUid": "shared-uid", "eventTitle": "Lunch" },
+        { "kind": "create_google", "canonicalUid": "icloud-only", "eventTitle": "Dentist" }
+      ]
+    },
+    {
+      "name": "does not plan a create when both sides have the event",
+      "googleEvents": [{ "uid": "shared-uid", "title": "Lunch" }],
+      "icloudEvents": [{ "uid": "shared-uid", "title": "Lunch" }],
+      "expected": [
+        { "kind": "noop", "canonicalUid": "shared-uid", "reason": "present_on_both_sides" }
+      ]
+    }
+  ],
+  "twoWayCases": [
+    {
+      "name": "linked google change updates icloud",
+      "direction": "two_way",
+      "conflictPolicy": {
+        "bothSidesChanged": "manual",
+        "unlinkedSameUid": "manual",
+        "deleteVsUpdate": "update_wins",
+        "icloudUidCollision": "ignore_known"
+      },
+      "links": [
+        {
+          "uid": "shared-uid",
+          "googleHash": "old-google-hash",
+          "icloudHash": "$hash:icloud:shared-uid"
+        }
+      ],
+      "googleEvents": [{ "uid": "shared-uid", "title": "Changed on Google" }],
+      "icloudEvents": [{ "uid": "shared-uid", "title": "Old Title" }],
+      "expected": [
+        { "kind": "update_icloud", "canonicalUid": "shared-uid", "eventTitle": "Changed on Google" }
+      ]
+    },
+    {
+      "name": "linked icloud change updates google",
+      "direction": "two_way",
+      "conflictPolicy": {
+        "bothSidesChanged": "manual",
+        "unlinkedSameUid": "manual",
+        "deleteVsUpdate": "update_wins",
+        "icloudUidCollision": "ignore_known"
+      },
+      "links": [
+        {
+          "uid": "shared-uid",
+          "googleHash": "$hash:google:shared-uid",
+          "icloudHash": "old-icloud-hash"
+        }
+      ],
+      "googleEvents": [{ "uid": "shared-uid", "title": "Old Title" }],
+      "icloudEvents": [{ "uid": "shared-uid", "title": "Changed on iCloud" }],
+      "expected": [
+        { "kind": "update_google", "canonicalUid": "shared-uid", "eventTitle": "Changed on iCloud" }
+      ]
+    },
+    {
+      "name": "linked equal events snapshot",
+      "direction": "two_way",
+      "conflictPolicy": {
+        "bothSidesChanged": "manual",
+        "unlinkedSameUid": "manual",
+        "deleteVsUpdate": "update_wins",
+        "icloudUidCollision": "ignore_known"
+      },
+      "links": [
+        {
+          "uid": "shared-uid",
+          "googleHash": "$hash:google:shared-uid",
+          "icloudHash": "$hash:icloud:shared-uid"
+        }
+      ],
+      "googleEvents": [{ "uid": "shared-uid", "title": "Lunch" }],
+      "icloudEvents": [{ "uid": "shared-uid", "title": "Lunch" }],
+      "expected": [{ "kind": "snapshot", "canonicalUid": "shared-uid" }]
+    },
+    {
+      "name": "both side changes are manual by default",
+      "direction": "two_way",
+      "conflictPolicy": {
+        "bothSidesChanged": "manual",
+        "unlinkedSameUid": "manual",
+        "deleteVsUpdate": "update_wins",
+        "icloudUidCollision": "ignore_known"
+      },
+      "links": [
+        {
+          "uid": "shared-uid",
+          "googleHash": "old-google-hash",
+          "icloudHash": "old-icloud-hash"
+        }
+      ],
+      "googleEvents": [{ "uid": "shared-uid", "title": "Changed on Google" }],
+      "icloudEvents": [{ "uid": "shared-uid", "title": "Changed on iCloud" }],
+      "expected": [
+        {
+          "kind": "conflict",
+          "canonicalUid": "shared-uid",
+          "reason": "both_sides_changed",
+          "resolution": "manual"
+        }
+      ]
+    },
+    {
+      "name": "newest updated wins picks google",
+      "direction": "two_way",
+      "conflictPolicy": {
+        "bothSidesChanged": "newest_updated_wins",
+        "unlinkedSameUid": "manual",
+        "deleteVsUpdate": "update_wins",
+        "icloudUidCollision": "ignore_known"
+      },
+      "links": [
+        {
+          "uid": "shared-uid",
+          "googleHash": "old-google-hash",
+          "icloudHash": "old-icloud-hash"
+        }
+      ],
+      "googleEvents": [
+        {
+          "uid": "shared-uid",
+          "title": "New Google Title",
+          "updatedAt": "2026-06-02T10:00:00Z"
+        }
+      ],
+      "icloudEvents": [
+        {
+          "uid": "shared-uid",
+          "title": "Old iCloud Title",
+          "updatedAt": "2026-06-02T09:00:00Z"
+        }
+      ],
+      "expected": [
+        {
+          "kind": "update_icloud",
+          "canonicalUid": "shared-uid",
+          "resolution": "auto_resolved",
+          "reason": "both_sides_changed",
+          "policy": "newest_updated_wins",
+          "eventTitle": "New Google Title"
+        }
+      ]
+    },
+    {
+      "name": "unlinked same uid can resolve with google wins",
+      "direction": "two_way",
+      "conflictPolicy": {
+        "bothSidesChanged": "manual",
+        "unlinkedSameUid": "google_wins",
+        "deleteVsUpdate": "update_wins",
+        "icloudUidCollision": "ignore_known"
+      },
+      "links": [],
+      "googleEvents": [{ "uid": "shared-uid", "title": "Google Title" }],
+      "icloudEvents": [{ "uid": "shared-uid", "title": "iCloud Title" }],
+      "expected": [
+        {
+          "kind": "update_icloud",
+          "canonicalUid": "shared-uid",
+          "resolution": "auto_resolved",
+          "reason": "unlinked_events_have_same_uid_but_differ",
+          "policy": "google_wins",
+          "eventTitle": "Google Title"
+        }
+      ]
+    },
+    {
+      "name": "unchanged remaining google event is deleted when icloud disappeared",
+      "direction": "two_way",
+      "conflictPolicy": {
+        "bothSidesChanged": "manual",
+        "unlinkedSameUid": "manual",
+        "deleteVsUpdate": "update_wins",
+        "icloudUidCollision": "ignore_known"
+      },
+      "links": [
+        {
+          "uid": "shared-uid",
+          "googleHash": "$hash:google:shared-uid",
+          "icloudHash": "old-icloud-hash"
+        }
+      ],
+      "googleEvents": [{ "uid": "shared-uid", "title": "Lunch" }],
+      "icloudEvents": [],
+      "expected": [
+        { "kind": "delete_google", "canonicalUid": "shared-uid", "eventTitle": "Lunch" }
+      ]
+    },
+    {
+      "name": "delete versus update uses update wins",
+      "direction": "two_way",
+      "conflictPolicy": {
+        "bothSidesChanged": "manual",
+        "unlinkedSameUid": "manual",
+        "deleteVsUpdate": "update_wins",
+        "icloudUidCollision": "ignore_known"
+      },
+      "links": [
+        {
+          "uid": "shared-uid",
+          "googleHash": "old-google-hash",
+          "icloudHash": "old-icloud-hash"
+        }
+      ],
+      "googleEvents": [{ "uid": "shared-uid", "title": "Changed on Google" }],
+      "icloudEvents": [],
+      "expected": [
+        {
+          "kind": "create_icloud",
+          "canonicalUid": "shared-uid",
+          "resolution": "auto_resolved",
+          "reason": "google_changed_while_icloud_deleted",
+          "policy": "update_wins",
+          "eventTitle": "Changed on Google"
+        }
+      ]
+    },
+    {
+      "name": "delete versus update uses delete wins",
+      "direction": "two_way",
+      "conflictPolicy": {
+        "bothSidesChanged": "manual",
+        "unlinkedSameUid": "manual",
+        "deleteVsUpdate": "delete_wins",
+        "icloudUidCollision": "ignore_known"
+      },
+      "links": [
+        {
+          "uid": "shared-uid",
+          "googleHash": "old-google-hash",
+          "icloudHash": "old-icloud-hash"
+        }
+      ],
+      "googleEvents": [{ "uid": "shared-uid", "title": "Changed on Google" }],
+      "icloudEvents": [],
+      "expected": [
+        {
+          "kind": "delete_google",
+          "canonicalUid": "shared-uid",
+          "resolution": "auto_resolved",
+          "reason": "google_changed_while_icloud_deleted",
+          "policy": "delete_wins",
+          "eventTitle": "Changed on Google"
+        }
+      ]
+    },
+    {
+      "name": "one way direction prevents reverse create",
+      "direction": "left_to_right",
+      "conflictPolicy": {
+        "bothSidesChanged": "manual",
+        "unlinkedSameUid": "manual",
+        "deleteVsUpdate": "update_wins",
+        "icloudUidCollision": "ignore_known"
+      },
+      "links": [],
+      "googleEvents": [],
+      "icloudEvents": [{ "uid": "icloud-only", "title": "Dentist" }],
+      "expected": [{ "kind": "snapshot", "canonicalUid": "icloud-only" }]
+    },
+    {
+      "name": "known icloud uid collision can be ignored",
+      "direction": "two_way",
+      "knownICloudUidCollisions": ["shared-uid"],
+      "conflictPolicy": {
+        "bothSidesChanged": "manual",
+        "unlinkedSameUid": "manual",
+        "deleteVsUpdate": "update_wins",
+        "icloudUidCollision": "ignore_known"
+      },
+      "links": [],
+      "googleEvents": [{ "uid": "shared-uid", "title": "Google Title" }],
+      "icloudEvents": [],
+      "expected": [
+        {
+          "kind": "conflict",
+          "canonicalUid": "shared-uid",
+          "reason": "icloud_uid_exists_in_different_calendar",
+          "resolution": "ignored"
+        }
+      ]
+    }
+  ]
+}

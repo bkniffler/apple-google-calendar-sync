@@ -31,15 +31,15 @@ future interchangeable taskbar/menu-bar interface.
 - [x] Add focused planner coverage for linked updates, snapshots, manual
       conflicts, provider-winner policies, delete-wins, one-way direction
       guards, and known iCloud UID collisions.
-- [ ] Port the full TypeScript planner into `insync-core`.
-- [ ] Port all planner tests from `src/sync/planner.test.ts`.
-- [ ] Cover initial sync, linked sync, one-way directions, deletes, update
+- [x] Port the full TypeScript planner into `insync-core`.
+- [x] Port all planner tests from `src/sync/planner.test.ts`.
+- [x] Cover initial sync, linked sync, one-way directions, deletes, update
       detection, and no-op snapshots.
-- [ ] Cover automatic conflict policies:
+- [x] Cover automatic conflict policies:
       `google_wins`, `icloud_wins`, `newest_updated_wins`, `update_wins`,
       `delete_wins`, and manual fallback.
-- [ ] Cover iCloud UID collision handling and known-collision suppression.
-- [ ] Add fixture-based tests that compare TypeScript and Rust decisions for
+- [x] Cover iCloud UID collision handling and known-collision suppression.
+- [x] Add fixture-based tests that compare TypeScript and Rust decisions for
       representative dry-run reports.
 
 ## 3. SQLite Layer
