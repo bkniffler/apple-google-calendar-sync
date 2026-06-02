@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ResolvedServiceConfig } from "../config/service-config";
-import type { ProviderName } from "../providers/types";
+import type { ProviderCalendar, ProviderName } from "../providers/types";
 import type { AppDatabase } from "./database";
 
 export function seedConfiguredPairs(db: AppDatabase, config: ResolvedServiceConfig): void {
@@ -45,45 +45,32 @@ export function seedConfiguredPairs(db: AppDatabase, config: ResolvedServiceConf
   `);
 
   db.transaction(() => {
-    for (const pair of config.pairs) {
-      const googleAccountId = stableId("account", "google", pair.google.accountEmail);
-      const icloudAccountId = stableId("account", "icloud", pair.icloud.accountEmail);
-      const googleCalendarId = stableId(
-        "calendar",
-        "google",
-        pair.google.accountEmail,
-        pair.google.calendarId
-      );
-      const icloudCalendarId = stableId(
-        "calendar",
-        "icloud",
-        pair.icloud.accountEmail,
-        pair.icloud.calendarPath
-      );
+    for (const pair of config.sync.pairs) {
+      const ids = configuredCalendarIds(config, pair);
 
-      insertAccount.run(googleAccountId, "google", pair.google.accountEmail);
-      insertAccount.run(icloudAccountId, "icloud", pair.icloud.accountEmail);
+      insertAccount.run(ids.googleAccountId, "google", config.google.accountLabel);
+      insertAccount.run(ids.icloudAccountId, "icloud", config.icloud.accountLabel);
       insertCalendar.run(
-        googleCalendarId,
-        googleAccountId,
-        pair.google.calendarId,
-        pair.google.calendarId
+        ids.googleCalendarId,
+        ids.googleAccountId,
+        pair.googleCalendarId,
+        pair.googleCalendarId
       );
       insertCalendar.run(
-        icloudCalendarId,
-        icloudAccountId,
-        pair.icloud.calendarPath,
-        pair.icloud.calendarPath
+        ids.icloudCalendarId,
+        ids.icloudAccountId,
+        pair.icloudCalendarId,
+        pair.icloudCalendarId
       );
-      insertSyncState.run(googleCalendarId);
-      insertSyncState.run(icloudCalendarId);
+      insertSyncState.run(ids.googleCalendarId);
+      insertSyncState.run(ids.icloudCalendarId);
       insertPair.run(
         pair.id,
-        googleCalendarId,
-        icloudCalendarId,
+        ids.googleCalendarId,
+        ids.icloudCalendarId,
         pair.direction,
         pair.enabled ? 1 : 0,
-        config.conflictPolicy
+        config.sync.conflictPolicy
       );
     }
   })();
@@ -118,24 +105,86 @@ export type CalendarIds = {
 };
 
 export function configuredCalendarIds(
-  pair: ResolvedServiceConfig["pairs"][number]
+  config: ResolvedServiceConfig,
+  pair: ResolvedServiceConfig["sync"]["pairs"][number]
 ): CalendarIds {
   return {
-    googleAccountId: stableId("account", "google", pair.google.accountEmail),
-    icloudAccountId: stableId("account", "icloud", pair.icloud.accountEmail),
+    googleAccountId: stableId("account", "google", config.google.accountLabel),
+    icloudAccountId: stableId("account", "icloud", config.icloud.accountLabel),
     googleCalendarId: stableId(
       "calendar",
       "google",
-      pair.google.accountEmail,
-      pair.google.calendarId
+      config.google.accountLabel,
+      pair.googleCalendarId
     ),
     icloudCalendarId: stableId(
       "calendar",
       "icloud",
-      pair.icloud.accountEmail,
-      pair.icloud.calendarPath
+      config.icloud.accountLabel,
+      pair.icloudCalendarId
     )
   };
+}
+
+export function cacheProviderCalendars(
+  db: AppDatabase,
+  input: {
+    provider: ProviderName;
+    accountLabel: string;
+    calendars: ProviderCalendar[];
+  }
+): void {
+  const accountId = stableId("account", input.provider, input.accountLabel);
+
+  const insertAccount = db.query(`
+    INSERT INTO accounts (id, provider, email)
+    VALUES (?, ?, ?)
+    ON CONFLICT(provider, email) DO UPDATE SET
+      updated_at = CURRENT_TIMESTAMP
+  `);
+
+  const insertCalendar = db.query(`
+    INSERT INTO calendars (
+      id,
+      account_id,
+      provider_calendar_id,
+      name,
+      timezone,
+      writable,
+      raw_json
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(account_id, provider_calendar_id) DO UPDATE SET
+      name = excluded.name,
+      timezone = excluded.timezone,
+      writable = excluded.writable,
+      raw_json = excluded.raw_json,
+      updated_at = CURRENT_TIMESTAMP
+  `);
+
+  const insertSyncState = db.query(`
+    INSERT INTO sync_state (calendar_id)
+    VALUES (?)
+    ON CONFLICT(calendar_id) DO NOTHING
+  `);
+
+  db.transaction(() => {
+    insertAccount.run(accountId, input.provider, input.accountLabel);
+
+    for (const calendar of input.calendars) {
+      const calendarId = stableId("calendar", input.provider, input.accountLabel, calendar.id);
+      insertCalendar.run(
+        calendarId,
+        accountId,
+        calendar.id,
+        calendar.name,
+        calendar.timezone ?? null,
+        calendar.writable ? 1 : 0,
+        JSON.stringify(calendar.raw)
+      );
+      insertSyncState.run(calendarId);
+    }
+  })();
 }
 
 export function loadEventLinks(db: AppDatabase, syncPairId: string): EventLink[] {
@@ -315,10 +364,4 @@ export function loadUnresolvedConflictUids(
     .all(syncPairId, reason);
 
   return new Set(rows.flatMap((row) => (row.canonical_uid ? [row.canonical_uid] : [])));
-}
-
-export function accountCredentialEnv(provider: ProviderName): string[] {
-  return provider === "google"
-    ? ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN"]
-    : ["ICLOUD_USERNAME", "ICLOUD_APP_SPECIFIC_PASSWORD"];
 }

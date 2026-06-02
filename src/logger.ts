@@ -1,13 +1,13 @@
 import pino from "pino";
-import type { Env } from "./config/env";
+import type { ResolvedServiceConfig } from "./config/service-config";
 
-export function createLogger(env: Env) {
-  if (env.INSYNC_LOG_LEVEL === "silent") {
-    return pino({ level: env.INSYNC_LOG_LEVEL });
+export function createLogger(level: ResolvedServiceConfig["logLevel"] | "info" = "info") {
+  if (level === "silent") {
+    return pino({ level });
   }
 
   return pino({
-    level: env.INSYNC_LOG_LEVEL,
+    level,
     transport: {
       target: "pino-pretty",
       options: {

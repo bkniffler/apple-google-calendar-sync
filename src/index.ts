@@ -1,17 +1,26 @@
 import { loadEnv } from "./config/env";
+import { resolveCredentials, storeGoogleRefreshToken, type ResolvedCredentials } from "./config/credentials";
 import { loadServiceConfig } from "./config/service-config";
 import { openDatabase } from "./db/database";
 import { migrate } from "./db/migrations";
-import { seedConfiguredPairs } from "./db/repositories";
+import { cacheProviderCalendars, seedConfiguredPairs } from "./db/repositories";
 import { createLogger } from "./logger";
 import { GoogleCalendarProvider, ICloudCalDavProvider } from "./providers";
 import { exchangeGoogleAuthCode, googleAuthUrl } from "./providers/google/oauth";
 import { SyncRunner } from "./sync/runner";
+import type { Logger } from "pino";
+import type { ResolvedServiceConfig } from "./config/service-config";
 
 const env = loadEnv();
-const logger = createLogger(env);
+let logger = createLogger(env.INSYNC_LOG_LEVEL ?? "info");
 
-type Command = "auth" | "calendars" | "doctor" | "migrate" | "sync";
+type Command = "auth" | "calendars" | "doctor" | "migrate" | "setup" | "sync";
+
+type Runtime = {
+  config: ResolvedServiceConfig;
+  credentials: ResolvedCredentials;
+  logger: Logger;
+};
 
 async function main(): Promise<void> {
   const [command = "doctor", ...args] = Bun.argv.slice(2);
@@ -42,52 +51,59 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === "setup") {
+    await setup();
+    return;
+  }
+
   await sync(args);
 }
 
 async function doctor(): Promise<void> {
-  const config = await loadServiceConfig(env.INSYNC_CONFIG);
-  const db = openDatabase(env.INSYNC_DB_PATH);
+  const { config, credentials, logger } = await loadRuntime();
+  const db = openDatabase(config.dbPath);
   migrate(db);
   seedConfiguredPairs(db, config);
   db.close();
 
   logger.info(
     {
-      dbPath: env.INSYNC_DB_PATH,
+      dbPath: config.dbPath,
       configPath: env.INSYNC_CONFIG,
-      pairCount: config.pairs.length,
-      pollIntervalSeconds: config.pollIntervalSeconds
+      secretStore: config.secretStore,
+      pairCount: config.sync.pairs.length,
+      pollIntervalSeconds: config.sync.pollIntervalSeconds
     },
     "insync doctor passed"
   );
 
-  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET || !env.GOOGLE_REFRESH_TOKEN) {
+  if (!credentials.google.clientId || !credentials.google.clientSecret || !credentials.google.refreshToken) {
     logger.warn("google credentials are not configured yet");
   }
 
-  if (!env.ICLOUD_USERNAME || !env.ICLOUD_APP_SPECIFIC_PASSWORD) {
+  if (!credentials.icloud.username || !credentials.icloud.appSpecificPassword) {
     logger.warn("icloud credentials are not configured yet");
   }
 }
 
 async function runMigrations(): Promise<void> {
-  const config = await loadServiceConfig(env.INSYNC_CONFIG);
-  const db = openDatabase(env.INSYNC_DB_PATH);
+  const { config, logger } = await loadRuntime();
+  const db = openDatabase(config.dbPath);
   migrate(db);
   seedConfiguredPairs(db, config);
   db.close();
-  logger.info({ dbPath: env.INSYNC_DB_PATH }, "database migrated");
+  logger.info({ dbPath: config.dbPath }, "database migrated");
 }
 
 async function sync(args: string[]): Promise<void> {
   const watch = args.includes("--watch");
   const once = args.includes("--once") || !watch;
   const apply = args.includes("--apply");
-  const config = await loadServiceConfig(env.INSYNC_CONFIG);
-  const dryRun = !apply || config.dryRun;
+  const reportSnapshots = args.includes("--report-all");
+  const { config, credentials, logger } = await loadRuntime();
+  const dryRun = !apply;
   const reportPath = readFlagValue(args, "--report") ?? (dryRun ? defaultReportPath() : undefined);
-  const db = openDatabase(env.INSYNC_DB_PATH);
+  const db = openDatabase(config.dbPath);
   migrate(db);
 
   const runner = new SyncRunner({
@@ -95,23 +111,24 @@ async function sync(args: string[]): Promise<void> {
     config,
     logger,
     dryRun,
+    reportSnapshots,
     reportPath,
     google: new GoogleCalendarProvider({
-      clientId: env.GOOGLE_CLIENT_ID,
-      clientSecret: env.GOOGLE_CLIENT_SECRET,
-      refreshToken: env.GOOGLE_REFRESH_TOKEN
+      clientId: credentials.google.clientId,
+      clientSecret: credentials.google.clientSecret,
+      refreshToken: credentials.google.refreshToken
     }),
     icloud: new ICloudCalDavProvider({
-      username: env.ICLOUD_USERNAME,
-      appSpecificPassword: env.ICLOUD_APP_SPECIFIC_PASSWORD,
-      serverUrl: env.ICLOUD_CALDAV_URL
+      username: credentials.icloud.username,
+      appSpecificPassword: credentials.icloud.appSpecificPassword,
+      serverUrl: credentials.icloud.caldavUrl
     })
   });
 
   if (dryRun) {
     logger.warn(
       { reportPath },
-      "sync is running in dry-run mode; pass --apply and set dryRun=false in config to write"
+      "sync is running in dry-run mode; pass --apply to write"
     );
   }
 
@@ -122,7 +139,7 @@ async function sync(args: string[]): Promise<void> {
   }
 
   logger.info(
-    { pollIntervalSeconds: config.pollIntervalSeconds },
+    { pollIntervalSeconds: config.sync.pollIntervalSeconds },
     "starting watch sync loop"
   );
 
@@ -135,7 +152,7 @@ async function sync(args: string[]): Promise<void> {
   };
 
   await runLoop();
-  setInterval(runLoop, config.pollIntervalSeconds * 1000);
+  setInterval(runLoop, config.sync.pollIntervalSeconds * 1000);
 }
 
 function isCommand(value: string): value is Command {
@@ -144,12 +161,14 @@ function isCommand(value: string): value is Command {
     value === "calendars" ||
     value === "doctor" ||
     value === "migrate" ||
+    value === "setup" ||
     value === "sync"
   );
 }
 
 function printUsage(): void {
   console.log(`Usage:
+  bun src/index.ts setup
   bun src/index.ts auth google
   bun src/index.ts calendars google
   bun src/index.ts calendars icloud
@@ -157,6 +176,7 @@ function printUsage(): void {
   bun src/index.ts migrate
   bun src/index.ts sync --once
   bun src/index.ts sync --once --report .insync/reports/report.csv
+  bun src/index.ts sync --once --report-all
   bun src/index.ts sync --once --apply
   bun src/index.ts sync --watch --apply`);
 }
@@ -182,15 +202,16 @@ async function auth(args: string[]): Promise<void> {
     throw new Error("Only `auth google` is supported; iCloud uses an app-specific password.");
   }
 
-  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) {
-    throw new Error("Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET before running auth.");
+  const { config, credentials, logger } = await loadRuntime();
+  if (!credentials.google.clientId || !credentials.google.clientSecret) {
+    throw new Error("Set google.clientId and google.clientSecret before running auth.");
   }
 
   const port = Number(args.find((arg) => arg.startsWith("--port="))?.split("=")[1] ?? 53682);
   const redirectUri = `http://127.0.0.1:${port}/oauth2/callback`;
   const state = crypto.randomUUID();
   const url = googleAuthUrl({
-    clientId: env.GOOGLE_CLIENT_ID,
+    clientId: credentials.google.clientId,
     redirectUri,
     state
   });
@@ -219,8 +240,8 @@ async function auth(args: string[]): Promise<void> {
           }
 
           const token = await exchangeGoogleAuthCode({
-            clientId: env.GOOGLE_CLIENT_ID as string,
-            clientSecret: env.GOOGLE_CLIENT_SECRET as string,
+            clientId: credentials.google.clientId as string,
+            clientSecret: credentials.google.clientSecret as string,
             redirectUri,
             code
           });
@@ -229,7 +250,12 @@ async function auth(args: string[]): Promise<void> {
             throw new Error("Google did not return a refresh token. Re-run with consent prompt.");
           }
 
-          console.log(`\nAdd this to .env:\n\nGOOGLE_REFRESH_TOKEN=${token.refreshToken}\n`);
+          await storeGoogleRefreshToken({
+            config,
+            configPath: env.INSYNC_CONFIG,
+            refreshToken: token.refreshToken
+          });
+          console.log(`\nGoogle refresh token stored via secretStore=${config.secretStore}.\n`);
           server.stop(true);
           resolve();
           return new Response("Google Calendar auth complete. You can close this tab.");
@@ -244,27 +270,41 @@ async function auth(args: string[]): Promise<void> {
 }
 
 async function calendars(args: string[]): Promise<void> {
-  const provider = args[0];
+  const provider = args[0] === "google" || args[0] === "icloud" ? args[0] : undefined;
+  if (!provider) {
+    throw new Error("Use `calendars google` or `calendars icloud`.");
+  }
+
+  const { config, credentials } = await loadRuntime();
   const client =
     provider === "google"
       ? new GoogleCalendarProvider({
-          clientId: env.GOOGLE_CLIENT_ID,
-          clientSecret: env.GOOGLE_CLIENT_SECRET,
-          refreshToken: env.GOOGLE_REFRESH_TOKEN
+          clientId: credentials.google.clientId,
+          clientSecret: credentials.google.clientSecret,
+          refreshToken: credentials.google.refreshToken
         })
       : provider === "icloud"
         ? new ICloudCalDavProvider({
-            username: env.ICLOUD_USERNAME,
-            appSpecificPassword: env.ICLOUD_APP_SPECIFIC_PASSWORD,
-            serverUrl: env.ICLOUD_CALDAV_URL
+            username: credentials.icloud.username,
+            appSpecificPassword: credentials.icloud.appSpecificPassword,
+            serverUrl: credentials.icloud.caldavUrl
           })
         : undefined;
 
   if (!client) {
-    throw new Error("Use `calendars google` or `calendars icloud`.");
+    throw new Error("Calendar provider was not configured.");
   }
 
   const calendars = await client.listCalendars();
+  const db = openDatabase(config.dbPath);
+  migrate(db);
+  cacheProviderCalendars(db, {
+    provider,
+    accountLabel: provider === "google" ? config.google.accountLabel : config.icloud.accountLabel,
+    calendars
+  });
+  db.close();
+
   console.table(
     calendars.map((calendar) => ({
       id: calendar.id,
@@ -273,6 +313,31 @@ async function calendars(args: string[]): Promise<void> {
       writable: calendar.writable
     }))
   );
+}
+
+async function setup(): Promise<void> {
+  const target = Bun.file(env.INSYNC_CONFIG);
+  if (!(await target.exists())) {
+    const example = await Bun.file("insync.example.json").text();
+    await Bun.write(env.INSYNC_CONFIG, example);
+    logger.info(
+      { configPath: env.INSYNC_CONFIG },
+      "created local config from insync.example.json"
+    );
+  }
+
+  await doctor();
+}
+
+async function loadRuntime(): Promise<Runtime> {
+  const config = await loadServiceConfig(env.INSYNC_CONFIG);
+  logger = createLogger(env.INSYNC_LOG_LEVEL ?? config.logLevel);
+  const credentials = await resolveCredentials({
+    config,
+    configPath: env.INSYNC_CONFIG,
+    logger
+  });
+  return { config, credentials, logger };
 }
 
 main().catch((error) => {

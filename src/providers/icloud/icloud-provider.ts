@@ -148,7 +148,7 @@ export class ICloudCalDavProvider implements CalendarProvider {
     if (!this.options.username || !this.options.appSpecificPassword) {
       throw new ProviderNotConfiguredError(
         this.name,
-        "set ICLOUD_USERNAME and ICLOUD_APP_SPECIFIC_PASSWORD"
+        "set icloud.username and configure appSpecificPassword in config or secret store"
       );
     }
   }

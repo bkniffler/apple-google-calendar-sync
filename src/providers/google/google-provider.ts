@@ -158,7 +158,7 @@ export class GoogleCalendarProvider implements CalendarProvider {
     if (!this.options.clientId || !this.options.clientSecret || !this.options.refreshToken) {
       throw new ProviderNotConfiguredError(
         this.name,
-        "set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REFRESH_TOKEN"
+        "set google.clientId and configure google clientSecret/refreshToken in config or secret store"
       );
     }
   }

@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/**/*.ts", "insync.config.ts"]
+  "include": ["src/**/*.ts"]
 }

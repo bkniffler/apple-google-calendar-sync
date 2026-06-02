@@ -25,6 +25,7 @@ export type SyncRunnerOptions = {
   logger: Logger;
   dryRun?: boolean;
   reportPath?: string | undefined;
+  reportSnapshots?: boolean | undefined;
 };
 
 export class SyncRunner {
@@ -32,18 +33,18 @@ export class SyncRunner {
 
   async runOnce(): Promise<void> {
     const { db, config, google, icloud, logger } = this.options;
-    const dryRun = this.options.dryRun ?? config.dryRun;
+    const dryRun = this.options.dryRun ?? true;
     const reportRows: ReportRow[] = [];
     seedConfiguredPairs(db, config);
 
-    for (const pair of config.pairs.filter((item) => item.enabled)) {
+    for (const pair of config.sync.pairs.filter((item) => item.enabled)) {
       logger.info({ pairId: pair.id }, "starting sync pair");
-      const calendarIds = configuredCalendarIds(pair);
+      const calendarIds = configuredCalendarIds(config, pair);
 
-      const googleChanges = await google.getChanges(pair.google.calendarId, {
+      const googleChanges = await google.getChanges(pair.googleCalendarId, {
         fullSync: true
       });
-      const icloudChanges = await icloud.getChanges(pair.icloud.calendarPath, {
+      const icloudChanges = await icloud.getChanges(pair.icloudCalendarId, {
         fullSync: true
       });
       const links = loadEventLinks(db, pair.id);
@@ -58,7 +59,7 @@ export class SyncRunner {
         icloudEvents: icloudChanges.events,
         knownICloudUidCollisions,
         direction: pair.direction,
-        conflictPolicy: config.conflictPolicy
+        conflictPolicy: resolveConflictPolicies(config)
       });
 
       logger.info(
@@ -68,15 +69,20 @@ export class SyncRunner {
           icloudEvents: icloudChanges.events.length,
           actions: actions.length,
           actionCounts: countActions(actions),
+          resolutionCounts: countResolutions(actions),
           samples: sampleActions(actions)
         },
         "planned sync actions"
       );
 
-      reportRows.push(...actions.map((action) => actionToReportRow(pair.id, action)));
+      reportRows.push(
+        ...actions
+          .filter((action) => this.options.reportSnapshots || action.kind !== "snapshot")
+          .map((action) => actionToReportRow(pair.id, action))
+      );
 
       for (const action of actions) {
-        await this.applyAction(pair.id, pair.google.calendarId, pair.icloud.calendarPath, action);
+        await this.applyAction(pair.id, pair.googleCalendarId, pair.icloudCalendarId, action);
       }
 
       updateCalendarSyncToken(db, calendarIds.googleCalendarId, googleChanges.syncToken);
@@ -99,9 +105,9 @@ export class SyncRunner {
     action: PlannedAction
   ): Promise<void> {
     const { db, google, icloud, logger } = this.options;
-    const dryRun = this.options.dryRun ?? this.options.config.dryRun;
+    const dryRun = this.options.dryRun ?? true;
 
-    if (!dryRun) {
+    if (!dryRun && action.kind !== "snapshot") {
       logger.info(
         {
           action: action.kind,
@@ -122,6 +128,10 @@ export class SyncRunner {
     }
 
     if (action.kind === "conflict") {
+      if (action.resolution === "ignored") {
+        return;
+      }
+
       recordConflict(db, {
         syncPairId,
         eventLinkId: action.link?.id,
@@ -329,15 +339,39 @@ function countActions(actions: PlannedAction[]): Record<string, number> {
   return counts;
 }
 
+function countResolutions(actions: PlannedAction[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const action of actions) {
+    const resolution =
+      action.kind === "conflict"
+        ? `conflict_${action.resolution}`
+        : action.resolution?.kind;
+    if (!resolution) {
+      continue;
+    }
+    counts[resolution] = (counts[resolution] ?? 0) + 1;
+  }
+  return counts;
+}
+
 function sampleActions(actions: PlannedAction[], limit = 20): Array<{
   kind: PlannedAction["kind"];
   canonicalUid: string;
   reason?: string | undefined;
+  resolution?: string | undefined;
+  policy?: string | undefined;
 }> {
-  return actions.slice(0, limit).map((action) => ({
+  const prioritized = [
+    ...actions.filter((action) => action.kind !== "snapshot"),
+    ...actions.filter((action) => action.kind === "snapshot")
+  ];
+
+  return prioritized.slice(0, limit).map((action) => ({
     kind: action.kind,
     canonicalUid: action.canonicalUid,
-    reason: action.kind === "conflict" ? action.reason : undefined
+    reason: action.kind === "conflict" ? action.reason : action.resolution?.reason,
+    resolution: action.kind === "conflict" ? action.resolution : action.resolution?.kind,
+    policy: action.kind === "conflict" ? undefined : action.resolution?.policy
   }));
 }
 
@@ -346,6 +380,8 @@ type ReportRow = {
   action: PlannedAction["kind"];
   canonical_uid: string;
   reason: string;
+  resolution: string;
+  conflict_policy: string;
   title: string;
   google_present: string;
   icloud_present: string;
@@ -373,7 +409,9 @@ function actionToReportRow(pairId: string, action: PlannedAction): ReportRow {
     pair_id: pairId,
     action: action.kind,
     canonical_uid: action.canonicalUid,
-    reason: action.kind === "conflict" ? action.reason : "",
+    reason: action.kind === "conflict" ? action.reason : action.resolution?.reason ?? "",
+    resolution: action.kind === "conflict" ? action.resolution : action.resolution?.kind ?? "",
+    conflict_policy: action.kind === "conflict" ? "" : action.resolution?.policy ?? "",
     title: event?.title ?? "",
     google_present: google ? "yes" : "no",
     icloud_present: icloud ? "yes" : "no",
@@ -398,6 +436,8 @@ function writeCsvReport(path: string, rows: ReportRow[]): void {
     "action",
     "canonical_uid",
     "reason",
+    "resolution",
+    "conflict_policy",
     "title",
     "google_present",
     "icloud_present",
@@ -483,14 +523,17 @@ function normalizeReportDate(value: CanonicalEvent["start"]) {
 type PlannedAction =
   | SnapshotAction
   | MutatingAction
-    | {
-        kind: "conflict";
-        canonicalUid: string;
-        reason: string;
-      link?: EventLink | undefined;
-      google?: CanonicalEvent | undefined;
-      icloud?: CanonicalEvent | undefined;
-    };
+  | ConflictAction;
+
+type ConflictAction = {
+  kind: "conflict";
+  canonicalUid: string;
+  reason: string;
+  resolution: "manual" | "ignored";
+  link?: EventLink | undefined;
+  google?: CanonicalEvent | undefined;
+  icloud?: CanonicalEvent | undefined;
+};
 
 type SnapshotAction = {
   kind: "snapshot";
@@ -502,6 +545,13 @@ type SnapshotAction = {
   icloudHash?: string | undefined;
   googleMeta?: ProviderEventMeta | undefined;
   icloudMeta?: ProviderEventMeta | undefined;
+  resolution?: AutoResolution | undefined;
+};
+
+type AutoResolution = {
+  kind: "auto_resolved";
+  reason: string;
+  policy: string;
 };
 
 type MutatingAction = {
@@ -521,15 +571,16 @@ type MutatingAction = {
   icloudHash?: string | undefined;
   googleMeta?: ProviderEventMeta | undefined;
   icloudMeta?: ProviderEventMeta | undefined;
+  resolution?: AutoResolution | undefined;
 };
 
-function planTwoWayActions(input: {
+export function planTwoWayActions(input: {
   links: EventLink[];
   googleEvents: CanonicalEvent[];
   icloudEvents: CanonicalEvent[];
   knownICloudUidCollisions?: Set<string>;
-  direction: ResolvedServiceConfig["pairs"][number]["direction"];
-  conflictPolicy: ResolvedServiceConfig["conflictPolicy"];
+  direction: ResolvedServiceConfig["sync"]["pairs"][number]["direction"];
+  conflictPolicy: ResolvedConflictPolicies;
 }): PlannedAction[] {
   const googleByUid = currentEventsByUid(input.googleEvents);
   const icloudByUid = currentEventsByUid(input.icloudEvents);
@@ -553,6 +604,7 @@ function planTwoWayActions(input: {
         kind: "conflict",
         canonicalUid: uid,
         reason: "icloud_uid_exists_in_different_calendar",
+        resolution: input.conflictPolicy.icloudUidCollision === "ignore_known" ? "ignored" : "manual",
         link,
         google
       });
@@ -560,7 +612,7 @@ function planTwoWayActions(input: {
     }
 
     if (!link) {
-      actions.push(...planUnlinked(uid, google, icloud, input.direction));
+      actions.push(...planUnlinked(uid, google, icloud, input.direction, input.conflictPolicy.unlinkedSameUid));
       continue;
     }
 
@@ -572,7 +624,14 @@ function planTwoWayActions(input: {
       } else if (!googleChanged && icloudChanged && canWriteGoogle(input.direction)) {
         actions.push({ kind: "update_google", canonicalUid: uid, event: icloud, link, google, icloud, googleHash, icloudHash });
       } else if (googleChanged && icloudChanged) {
-        actions.push(resolveConflict(uid, link, google, icloud, input.conflictPolicy));
+        actions.push(resolveChangedConflict(
+          uid,
+          link,
+          google,
+          icloud,
+          input.direction,
+          input.conflictPolicy.bothSidesChanged
+        ));
       } else {
         actions.push({ kind: "snapshot", canonicalUid: uid, link, google, icloud, googleHash, icloudHash });
       }
@@ -581,7 +640,15 @@ function planTwoWayActions(input: {
 
     if (google && icloudDeleted) {
       if (googleChanged) {
-        actions.push({ kind: "conflict", canonicalUid: uid, reason: "google_changed_while_icloud_deleted", link, google });
+        actions.push(resolveDeleteUpdateConflict({
+          uid,
+          reason: "google_changed_while_icloud_deleted",
+          deletedSide: "icloud",
+          changedEvent: google,
+          link,
+          direction: input.direction,
+          policy: input.conflictPolicy.deleteVsUpdate
+        }));
       } else if (canWriteGoogle(input.direction)) {
         actions.push({ kind: "delete_google", canonicalUid: uid, event: google, link, google, googleHash });
       } else if (canWriteICloud(input.direction)) {
@@ -592,7 +659,15 @@ function planTwoWayActions(input: {
 
     if (icloud && googleDeleted) {
       if (icloudChanged) {
-        actions.push({ kind: "conflict", canonicalUid: uid, reason: "icloud_changed_while_google_deleted", link, icloud });
+        actions.push(resolveDeleteUpdateConflict({
+          uid,
+          reason: "icloud_changed_while_google_deleted",
+          deletedSide: "google",
+          changedEvent: icloud,
+          link,
+          direction: input.direction,
+          policy: input.conflictPolicy.deleteVsUpdate
+        }));
       } else if (canWriteICloud(input.direction)) {
         actions.push({ kind: "delete_icloud", canonicalUid: uid, event: icloud, link, icloud, icloudHash });
       } else if (canWriteGoogle(input.direction)) {
@@ -621,7 +696,8 @@ function planUnlinked(
   uid: string,
   google: CanonicalEvent | undefined,
   icloud: CanonicalEvent | undefined,
-  direction: ResolvedServiceConfig["pairs"][number]["direction"]
+  direction: ResolvedServiceConfig["sync"]["pairs"][number]["direction"],
+  conflictPolicy: ResolvedConflictPolicies["unlinkedSameUid"]
 ): PlannedAction[] {
   if (google && icloud) {
     const googleHash = hashCanonicalEvent(google);
@@ -629,7 +705,9 @@ function planUnlinked(
     if (googleHash === icloudHash) {
       return [{ kind: "snapshot", canonicalUid: uid, google, icloud, googleHash, icloudHash }];
     }
-    return [{ kind: "conflict", canonicalUid: uid, reason: "unlinked_events_have_same_uid_but_differ", google, icloud }];
+    return [
+      resolveUnlinkedSameUidConflict(uid, google, icloud, direction, conflictPolicy)
+    ];
   }
 
   if (google && canWriteICloud(direction)) {
@@ -643,30 +721,238 @@ function planUnlinked(
   return [{ kind: "snapshot", canonicalUid: uid, google, icloud }];
 }
 
-function resolveConflict(
+type ResolvedConflictPolicies = {
+  bothSidesChanged: ResolvedServiceConfig["sync"]["conflictPolicy"];
+  unlinkedSameUid: ResolvedServiceConfig["sync"]["conflictPolicy"];
+  deleteVsUpdate: ResolvedServiceConfig["sync"]["conflicts"]["deleteVsUpdate"];
+  icloudUidCollision: ResolvedServiceConfig["sync"]["conflicts"]["icloudUidCollision"];
+};
+
+function resolveConflictPolicies(config: ResolvedServiceConfig): ResolvedConflictPolicies {
+  const defaultPolicy = config.sync.conflicts.default ?? config.sync.conflictPolicy;
+  return {
+    bothSidesChanged: config.sync.conflicts.bothSidesChanged ?? defaultPolicy,
+    unlinkedSameUid: config.sync.conflicts.unlinkedSameUid ?? defaultPolicy,
+    deleteVsUpdate: config.sync.conflicts.deleteVsUpdate,
+    icloudUidCollision: config.sync.conflicts.icloudUidCollision
+  };
+}
+
+function resolveChangedConflict(
   uid: string,
   link: EventLink,
   google: CanonicalEvent,
   icloud: CanonicalEvent,
-  policy: ResolvedServiceConfig["conflictPolicy"]
+  direction: ResolvedServiceConfig["sync"]["pairs"][number]["direction"],
+  policy: ResolvedServiceConfig["sync"]["conflictPolicy"]
 ): PlannedAction {
+  return resolveProviderWinnerConflict({
+    uid,
+    reason: "both_sides_changed",
+    link,
+    google,
+    icloud,
+    policy,
+    direction
+  });
+}
+
+function resolveUnlinkedSameUidConflict(
+  uid: string,
+  google: CanonicalEvent,
+  icloud: CanonicalEvent,
+  direction: ResolvedServiceConfig["sync"]["pairs"][number]["direction"],
+  policy: ResolvedServiceConfig["sync"]["conflictPolicy"]
+): PlannedAction {
+  return resolveProviderWinnerConflict({
+    uid,
+    reason: "unlinked_events_have_same_uid_but_differ",
+    google,
+    icloud,
+    policy,
+    direction
+  });
+}
+
+function resolveProviderWinnerConflict(input: {
+  uid: string;
+  reason: string;
+  link?: EventLink | undefined;
+  google: CanonicalEvent;
+  icloud: CanonicalEvent;
+  policy: ResolvedServiceConfig["sync"]["conflictPolicy"];
+  direction: ResolvedServiceConfig["sync"]["pairs"][number]["direction"];
+}): PlannedAction {
+  const winner = selectProviderWinner(input.google, input.icloud, input.policy);
+
+  if (winner === "google" && canWriteICloud(input.direction)) {
+    return autoResolvedAction({
+      kind: "update_icloud",
+      canonicalUid: input.uid,
+      event: input.google,
+      link: input.link,
+      google: input.google,
+      icloud: input.icloud,
+      reason: input.reason,
+      policy: input.policy
+    });
+  }
+
+  if (winner === "icloud" && canWriteGoogle(input.direction)) {
+    return autoResolvedAction({
+      kind: "update_google",
+      canonicalUid: input.uid,
+      event: input.icloud,
+      link: input.link,
+      google: input.google,
+      icloud: input.icloud,
+      reason: input.reason,
+      policy: input.policy
+    });
+  }
+
+  return manualConflict(input.uid, input.reason, {
+    link: input.link,
+    google: input.google,
+    icloud: input.icloud
+  });
+}
+
+function resolveDeleteUpdateConflict(input: {
+  uid: string;
+  reason: "google_changed_while_icloud_deleted" | "icloud_changed_while_google_deleted";
+  deletedSide: "google" | "icloud";
+  changedEvent: CanonicalEvent;
+  link?: EventLink | undefined;
+  direction: ResolvedServiceConfig["sync"]["pairs"][number]["direction"];
+  policy: ResolvedConflictPolicies["deleteVsUpdate"];
+}): PlannedAction {
+  if (input.policy === "manual") {
+    return manualConflict(input.uid, input.reason, {
+      link: input.link,
+      google: input.deletedSide === "icloud" ? input.changedEvent : undefined,
+      icloud: input.deletedSide === "google" ? input.changedEvent : undefined
+    });
+  }
+
+  if (input.policy === "delete_wins") {
+    if (input.deletedSide === "icloud" && canWriteGoogle(input.direction)) {
+      return autoResolvedAction({
+        kind: "delete_google",
+        canonicalUid: input.uid,
+        event: input.changedEvent,
+        link: input.link,
+        google: input.changedEvent,
+        reason: input.reason,
+        policy: input.policy
+      });
+    }
+
+    if (input.deletedSide === "google" && canWriteICloud(input.direction)) {
+      return autoResolvedAction({
+        kind: "delete_icloud",
+        canonicalUid: input.uid,
+        event: input.changedEvent,
+        link: input.link,
+        icloud: input.changedEvent,
+        reason: input.reason,
+        policy: input.policy
+      });
+    }
+
+    return manualConflict(input.uid, input.reason, {
+      link: input.link,
+      google: input.deletedSide === "icloud" ? input.changedEvent : undefined,
+      icloud: input.deletedSide === "google" ? input.changedEvent : undefined
+    });
+  }
+
+  if (input.deletedSide === "icloud" && canWriteICloud(input.direction)) {
+    return autoResolvedAction({
+      kind: "create_icloud",
+      canonicalUid: input.uid,
+      event: input.changedEvent,
+      link: input.link,
+      google: input.changedEvent,
+      reason: input.reason,
+      policy: input.policy
+    });
+  }
+
+  if (input.deletedSide === "google" && canWriteGoogle(input.direction)) {
+    return autoResolvedAction({
+      kind: "create_google",
+      canonicalUid: input.uid,
+      event: input.changedEvent,
+      link: input.link,
+      icloud: input.changedEvent,
+      reason: input.reason,
+      policy: input.policy
+    });
+  }
+
+  return manualConflict(input.uid, input.reason, {
+    link: input.link,
+    google: input.deletedSide === "icloud" ? input.changedEvent : undefined,
+    icloud: input.deletedSide === "google" ? input.changedEvent : undefined
+  });
+}
+
+function selectProviderWinner(
+  google: CanonicalEvent,
+  icloud: CanonicalEvent,
+  policy: ResolvedServiceConfig["sync"]["conflictPolicy"]
+): "google" | "icloud" | undefined {
   if (policy === "google_wins") {
-    return { kind: "update_icloud", canonicalUid: uid, event: google, link, google, icloud };
+    return "google";
   }
   if (policy === "icloud_wins") {
-    return { kind: "update_google", canonicalUid: uid, event: icloud, link, google, icloud };
+    return "icloud";
   }
   if (policy === "newest_updated_wins") {
     const googleUpdated = Date.parse(google.providerMeta.updatedAt ?? "");
     const icloudUpdated = Date.parse(icloud.providerMeta.updatedAt ?? "");
-    if (Number.isFinite(googleUpdated) && googleUpdated > icloudUpdated) {
-      return { kind: "update_icloud", canonicalUid: uid, event: google, link, google, icloud };
-    }
-    if (Number.isFinite(icloudUpdated) && icloudUpdated > googleUpdated) {
-      return { kind: "update_google", canonicalUid: uid, event: icloud, link, google, icloud };
+    if (Number.isFinite(googleUpdated) && Number.isFinite(icloudUpdated)) {
+      if (googleUpdated > icloudUpdated) {
+        return "google";
+      }
+      if (icloudUpdated > googleUpdated) {
+        return "icloud";
+      }
     }
   }
-  return { kind: "conflict", canonicalUid: uid, reason: "both_sides_changed", link, google, icloud };
+  return undefined;
+}
+
+function autoResolvedAction<T extends MutatingAction>(
+  action: T & { reason: string; policy: string }
+): T {
+  (action as T & { resolution: AutoResolution }).resolution = {
+    kind: "auto_resolved",
+    reason: action.reason,
+    policy: action.policy
+  };
+  delete (action as T & { reason?: string }).reason;
+  delete (action as T & { policy?: string }).policy;
+  return action;
+}
+
+function manualConflict(
+  canonicalUid: string,
+  reason: string,
+  values: {
+    link?: EventLink | undefined;
+    google?: CanonicalEvent | undefined;
+    icloud?: CanonicalEvent | undefined;
+  }
+): ConflictAction {
+  return {
+    kind: "conflict",
+    canonicalUid,
+    reason,
+    resolution: "manual",
+    ...values
+  };
 }
 
 function currentEventsByUid(events: CanonicalEvent[]): Map<string, CanonicalEvent> {
@@ -707,10 +993,10 @@ function snapshotUpsert(
   };
 }
 
-function canWriteGoogle(direction: ResolvedServiceConfig["pairs"][number]["direction"]): boolean {
+function canWriteGoogle(direction: ResolvedServiceConfig["sync"]["pairs"][number]["direction"]): boolean {
   return direction === "two_way" || direction === "right_to_left";
 }
 
-function canWriteICloud(direction: ResolvedServiceConfig["pairs"][number]["direction"]): boolean {
+function canWriteICloud(direction: ResolvedServiceConfig["sync"]["pairs"][number]["direction"]): boolean {
   return direction === "two_way" || direction === "left_to_right";
 }

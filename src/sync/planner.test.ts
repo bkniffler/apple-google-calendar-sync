@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { CanonicalEvent } from "../providers/types";
 import { hashCanonicalEvent } from "./event-hash";
 import { planInitialActions } from "./planner";
+import { planTwoWayActions } from "./runner";
 
 describe("planInitialActions", () => {
   test("creates missing event on the opposite provider", () => {
@@ -157,6 +158,84 @@ describe("hashCanonicalEvent", () => {
   });
 });
 
+describe("planTwoWayActions conflict policies", () => {
+  test("auto-resolves both-side changes with newest updated wins", () => {
+    const google = {
+      ...makeEvent("shared-uid", "New Google Title"),
+      providerMeta: {
+        ...makeEvent("shared-uid", "New Google Title").providerMeta,
+        updatedAt: "2026-06-02T10:00:00Z"
+      }
+    };
+    const icloud = {
+      ...makeEvent("shared-uid", "Old iCloud Title"),
+      providerMeta: {
+        ...makeEvent("shared-uid", "Old iCloud Title").providerMeta,
+        updatedAt: "2026-06-02T09:00:00Z"
+      }
+    };
+
+    const actions = planTwoWayActions({
+      links: [makeLink("shared-uid")],
+      googleEvents: [google],
+      icloudEvents: [icloud],
+      direction: "two_way",
+      conflictPolicy: {
+        bothSidesChanged: "newest_updated_wins",
+        unlinkedSameUid: "manual",
+        deleteVsUpdate: "update_wins",
+        icloudUidCollision: "ignore_known"
+      }
+    });
+
+    expect(actions).toMatchObject([
+      {
+        kind: "update_icloud",
+        canonicalUid: "shared-uid",
+        resolution: {
+          kind: "auto_resolved",
+          reason: "both_sides_changed",
+          policy: "newest_updated_wins"
+        }
+      }
+    ]);
+  });
+
+  test("auto-resolves delete-versus-update with update wins", () => {
+    const google = makeEvent("shared-uid", "Changed on Google");
+
+    const actions = planTwoWayActions({
+      links: [
+        {
+          ...makeLink("shared-uid"),
+          icloud_href: "https://caldav.icloud.com/calendars/example/shared-uid.ics"
+        }
+      ],
+      googleEvents: [google],
+      icloudEvents: [],
+      direction: "two_way",
+      conflictPolicy: {
+        bothSidesChanged: "manual",
+        unlinkedSameUid: "manual",
+        deleteVsUpdate: "update_wins",
+        icloudUidCollision: "ignore_known"
+      }
+    });
+
+    expect(actions).toMatchObject([
+      {
+        kind: "create_icloud",
+        canonicalUid: "shared-uid",
+        resolution: {
+          kind: "auto_resolved",
+          reason: "google_changed_while_icloud_deleted",
+          policy: "update_wins"
+        }
+      }
+    ]);
+  });
+});
+
 function makeEvent(canonicalUid: string, title: string): CanonicalEvent {
   return {
     canonicalUid,
@@ -182,5 +261,24 @@ function makeEvent(canonicalUid: string, title: string): CanonicalEvent {
       etag: "etag"
     },
     raw: {}
+  };
+}
+
+function makeLink(canonicalUid: string) {
+  return {
+    id: `link-${canonicalUid}`,
+    sync_pair_id: "personal",
+    canonical_uid: canonicalUid,
+    google_event_id: canonicalUid,
+    google_ical_uid: canonicalUid,
+    google_etag: "old-google-etag",
+    icloud_href: `https://caldav.icloud.com/calendars/example/${canonicalUid}.ics`,
+    icloud_uid: canonicalUid,
+    icloud_etag: "old-icloud-etag",
+    google_hash: "old-google-hash",
+    icloud_hash: "old-icloud-hash",
+    last_synced_hash: "old-hash",
+    deleted_google_at: null,
+    deleted_icloud_at: null
   };
 }

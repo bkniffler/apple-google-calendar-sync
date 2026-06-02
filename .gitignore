@@ -1,5 +1,6 @@
 node_modules/
 .env
+insync.local.json
 .insync/
 *.db
 *.db-shm

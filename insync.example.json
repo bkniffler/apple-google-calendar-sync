@@ -1,0 +1,37 @@
+{
+  "secretStore": "none",
+  "dbPath": ".insync/insync.db",
+  "logLevel": "info",
+  "google": {
+    "accountLabel": "personal",
+    "clientId": "",
+    "clientSecret": "",
+    "refreshToken": ""
+  },
+  "icloud": {
+    "accountLabel": "personal",
+    "username": "",
+    "appSpecificPassword": "",
+    "caldavUrl": "https://caldav.icloud.com"
+  },
+  "sync": {
+    "pollIntervalSeconds": 300,
+    "conflictPolicy": "manual",
+    "conflicts": {
+      "default": "manual",
+      "bothSidesChanged": "manual",
+      "unlinkedSameUid": "manual",
+      "deleteVsUpdate": "update_wins",
+      "icloudUidCollision": "ignore_known"
+    },
+    "pairs": [
+      {
+        "id": "personal",
+        "enabled": true,
+        "direction": "two_way",
+        "googleCalendarId": "primary",
+        "icloudCalendarId": "https://caldav.icloud.com/..."
+      }
+    ]
+  }
+}

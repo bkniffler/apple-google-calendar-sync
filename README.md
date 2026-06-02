@@ -2,75 +2,182 @@
 
 Bun/TypeScript service for syncing selected iCloud calendars with selected Google calendars.
 
-## Current shape
-
-This is a structured service scaffold with:
-
-- Bun + TypeScript
-- SQLite via `bun:sqlite`
-- typed config loading
-- migration runner
-- provider boundaries for Google Calendar and iCloud CalDAV
-- sync planner/runner skeleton
-- CLI commands for doctor, migrate, one-shot sync, and watch mode
-
 ## Setup
 
 ```bash
 bun install
-cp .env.example .env
-bun run migrate
-bun run doctor
+bun run setup
 ```
 
-Edit `insync.config.ts` to define calendar pairs.
+`setup` creates `insync.local.json` from `insync.example.json` when it does not
+exist, runs migrations, and checks the configured paths.
 
-For Google:
+Edit `insync.local.json` with your provider settings and calendar pair:
 
-1. Create an OAuth desktop/web client in Google Cloud.
+```json
+{
+  "secretStore": "none",
+  "dbPath": ".insync/insync.db",
+  "logLevel": "info",
+  "google": {
+    "accountLabel": "personal",
+    "clientId": "",
+    "clientSecret": "",
+    "refreshToken": ""
+  },
+  "icloud": {
+    "accountLabel": "personal",
+    "username": "",
+    "appSpecificPassword": "",
+    "caldavUrl": "https://caldav.icloud.com"
+  },
+  "sync": {
+    "pollIntervalSeconds": 300,
+    "conflictPolicy": "manual",
+    "conflicts": {
+      "default": "manual",
+      "bothSidesChanged": "manual",
+      "unlinkedSameUid": "manual",
+      "deleteVsUpdate": "update_wins",
+      "icloudUidCollision": "ignore_known"
+    },
+    "pairs": [
+      {
+        "id": "personal",
+        "enabled": true,
+        "direction": "two_way",
+        "googleCalendarId": "primary",
+        "icloudCalendarId": "https://caldav.icloud.com/..."
+      }
+    ]
+  }
+}
+```
+
+`insync.local.json` is ignored by git. SQLite state, reports, event links, sync
+cursors, and conflicts live under `.insync/` by default.
+
+## Secret Store
+
+Set `"secretStore": "none"` to keep credentials in `insync.local.json`.
+
+Set `"secretStore": "os"` to use the OS secret store via `@napi-rs/keyring`.
+If `clientSecret`, `refreshToken`, or `appSpecificPassword` are present in
+config, insync moves them into the OS secret store and removes them from the
+JSON file the next time you run a command.
+
+The current OS backend uses the native platform store exposed by
+`@napi-rs/keyring`, such as macOS Keychain, Linux Secret Service, and Windows
+Credential Manager. Platform-specific native binaries are delivered through
+the package's optional dependencies during install.
+
+## Google Auth
+
+1. Create a Google OAuth desktop/web client.
 2. Add `http://127.0.0.1:53682/oauth2/callback` as a redirect URI.
-3. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in `.env`.
-4. Run `bun run auth:google`.
-5. Put the printed `GOOGLE_REFRESH_TOKEN` into `.env`.
+3. Put `google.clientId` and `google.clientSecret` in `insync.local.json`.
+4. Run:
 
-For iCloud:
+```bash
+bun run auth:google
+```
 
-1. Create an Apple app-specific password.
-2. Set `ICLOUD_USERNAME` and `ICLOUD_APP_SPECIFIC_PASSWORD` in `.env`.
-3. Run `bun run calendars:icloud` and copy the calendar URL/path into `insync.config.ts`.
+The refresh token is written back to config or stored in the OS secret store,
+depending on `secretStore`.
+
+## Calendar Discovery
+
+```bash
+bun run calendars:google
+bun run calendars:icloud
+```
+
+These commands print calendars and cache discovered calendar metadata in SQLite.
+Copy the selected IDs into `sync.pairs`.
+
+## Sync
+
+Dry run:
+
+```bash
+bun run sync:dry
+```
+
+Apply writes:
+
+```bash
+bun run sync:apply
+```
+
+Watch mode:
+
+```bash
+bun run sync:watch
+```
+
+Dry runs write a CSV report to `.insync/reports/` by default. Reports include
+actionable rows by default. Add `--report-all` to include snapshots:
+
+```bash
+bun src/index.ts sync --once --report-all
+```
+
+## Conflict Policies
+
+`sync.conflicts` controls automatic conflict handling.
+
+```json
+{
+  "default": "manual",
+  "bothSidesChanged": "newest_updated_wins",
+  "unlinkedSameUid": "manual",
+  "deleteVsUpdate": "update_wins",
+  "icloudUidCollision": "ignore_known"
+}
+```
+
+Provider-winner policies:
+
+- `manual`: report and record a conflict.
+- `google_wins`: write the Google copy to iCloud.
+- `icloud_wins`: write the iCloud copy to Google.
+- `newest_updated_wins`: use provider update timestamps when both are known.
+
+Delete-versus-update policies:
+
+- `manual`: report and record a conflict.
+- `update_wins`: recreate the deleted side from the changed side.
+- `delete_wins`: delete the changed side too.
+
+iCloud UID collision policies:
+
+- `manual`: keep reporting the collision.
+- `ignore_known`: record once, then suppress repeated write attempts.
+
+CSV reports include `reason`, `resolution`, and `conflict_policy` columns so
+auto-resolved and ignored conflicts remain auditable.
 
 ## Commands
 
 ```bash
+bun run setup
 bun run auth:google
 bun run calendars:google
 bun run calendars:icloud
 bun run doctor
 bun run migrate
-bun run sync
+bun run sync:dry
+bun run sync:apply
 bun run sync:watch
-```
-
-Dry runs write a CSV report to `.insync/reports/` by default. You can choose
-the path explicitly:
-
-```bash
-bun src/index.ts sync --once --report .insync/reports/review.csv
-```
-
-`sync` runs as a dry-run by default. To write changes, set `dryRun: false`
-in `insync.config.ts`, then run:
-
-```bash
-bun src/index.ts sync --once --apply
 ```
 
 ## Current Sync Behavior
 
 - Full-scan sync on each run for reliable delete detection.
 - Two-way, Google-to-iCloud, and iCloud-to-Google directions.
-- Dry-run by default.
-- Conflict policies: manual, google_wins, icloud_wins, newest_updated_wins.
+- Dry-run by default; writes only happen with `--apply`.
+- Conflict policies: manual, provider-winner, newest-updated-wins,
+  delete/update-wins, and known iCloud UID collision ignore.
 - Syncs normal events, all-day events, title, description, location, status,
   visibility, reminders, attendees, and basic recurrence lines.
 
@@ -81,9 +188,5 @@ bun src/index.ts sync --once --apply
   provider-specific constraints.
 - Recurring exceptions are represented differently by Google and iCalendar.
   Basic recurrence is supported; complex edited instances need careful testing.
-- iCloud is scanned via CalDAV objects. Google incremental tokens are captured
-  but not used yet because the first working engine favors full-state safety.
-
-## Notes
-
-The first implementation keeps provider calls behind adapters. That is deliberate: the sync ledger, conflict handling, and event identity model need to be stable before wiring destructive writes to live calendars.
+- iCloud can reject creates when the same UID already exists in another iCloud
+  calendar. Insync records those as conflicts instead of repeatedly retrying.
