@@ -185,10 +185,10 @@ border.
 - [x] Add keyboard-first navigation with visible but compact command hints.
 - [ ] Add command palette style actions for sync, dry-run, apply, setup,
       conflicts, export report, and quit.
-- [ ] Add careful color semantics:
+- [x] Add careful color semantics:
       neutral for idle, blue/cyan for running, green for clean, amber for
       warnings/conflicts, red for errors/destructive actions.
-- [ ] Add graceful empty, loading, success, warning, and error states.
+- [x] Add graceful empty, loading, success, warning, and error states.
 - [x] Add responsive layouts for narrow terminals and wide terminals.
 - [ ] Add snapshot tests or golden rendering tests for key TUI screens where
       practical.

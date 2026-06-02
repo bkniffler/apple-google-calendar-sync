@@ -2386,9 +2386,9 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
         Span::styled(
             model.run_filter.label(),
             Style::default().fg(if model.view == AppView::Runs {
-                Color::Yellow
+                color_warning()
             } else {
-                Color::DarkGray
+                color_muted()
             }),
         ),
         Span::raw("  Selected "),
@@ -2434,7 +2434,7 @@ fn render_metrics(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     frame.render_widget(
         Gauge::default()
             .block(chrome_block("Enabled Pairs"))
-            .gauge_style(Style::default().fg(Color::Green))
+            .gauge_style(Style::default().fg(pair_gauge_color(model)))
             .ratio(enabled_ratio)
             .label(format!(
                 "{}/{}",
@@ -2449,9 +2449,9 @@ fn render_metrics(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
         "Conflicts",
         &model.conflict_count.to_string(),
         if model.conflict_count == 0 {
-            Color::Green
+            color_success()
         } else {
-            Color::Yellow
+            color_warning()
         },
     );
     render_metric(
@@ -2460,10 +2460,10 @@ fn render_metrics(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
         "Last Run",
         last_run_label(model).as_str(),
         match model.last_run_status.as_deref() {
-            Some("failed") => Color::Red,
-            Some("completed") => Color::Green,
-            Some("running") => Color::Cyan,
-            _ => Color::Gray,
+            Some("failed") => color_danger(),
+            Some("completed") => color_success(),
+            Some("running") => color_running(),
+            _ => color_neutral(),
         },
     );
 }
@@ -2480,6 +2480,20 @@ fn render_metric(frame: &mut Frame<'_>, area: Rect, title: &str, value: &str, co
 }
 
 fn render_pair_table(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+    if model.pairs.is_empty() {
+        render_empty_state(
+            frame,
+            area,
+            "Calendar Pairs",
+            &[
+                "No calendar pairs configured.",
+                "Run setup or press s to start the guided setup flow.",
+            ],
+            color_warning(),
+        );
+        return;
+    }
+
     let compact = area.width < 95;
     let rows = model
         .pairs
@@ -2499,7 +2513,7 @@ fn render_pair_table(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
         .header(
             Row::new(["", "Pair", "State", "Direction"]).style(
                 Style::default()
-                    .fg(Color::Gray)
+                    .fg(color_muted())
                     .add_modifier(Modifier::BOLD),
             ),
         )
@@ -2519,7 +2533,7 @@ fn render_pair_table(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
         .header(
             Row::new(["", "Pair", "State", "Direction", "Google", "iCloud"]).style(
                 Style::default()
-                    .fg(Color::Gray)
+                    .fg(color_muted())
                     .add_modifier(Modifier::BOLD),
             ),
         )
@@ -2549,12 +2563,12 @@ fn pair_row(pair: &insync_app::AppPair, model: &AppModel, compact: bool) -> Row<
     let enabled = if pair.enabled { "on" } else { "off" };
     let style = if selected {
         Style::default()
-            .fg(Color::Cyan)
+            .fg(color_running())
             .add_modifier(Modifier::BOLD)
     } else if pair.enabled {
         Style::default().fg(Color::White)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(color_muted())
     };
 
     let cells = if compact {
@@ -2683,10 +2697,17 @@ fn render_selected_pair(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
             ]
         }
     } else {
-        vec![
-            Line::from("No calendar pairs configured."),
-            Line::from("Run insync setup --interactive to add calendars."),
-        ]
+        render_empty_state(
+            frame,
+            area,
+            "Selected Pair",
+            &[
+                "No calendar pair selected.",
+                "Run setup or press s to add calendars.",
+            ],
+            color_warning(),
+        );
+        return;
     };
 
     frame.render_widget(
@@ -2698,24 +2719,54 @@ fn render_selected_pair(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
 }
 
 fn render_activity(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
-    let items = [
-        format!("Status: {}", status_label(model.status)),
-        format!("Unresolved conflicts: {}", model.conflict_count),
-        format!("Last run: {}", last_run_label(model)),
-        format!("Next run: {}", next_run_label(model)),
-        format!(
-            "Recent error: {}",
-            model.recent_error.as_deref().unwrap_or("-")
+    let items = vec![
+        activity_item(
+            format!("Status: {}", status_label(model.status)),
+            status_color(model.status),
         ),
-        format!(
-            "App message: {}",
-            model.last_message.as_deref().unwrap_or("-")
+        activity_item(
+            format!("Unresolved conflicts: {}", model.conflict_count),
+            if model.conflict_count == 0 {
+                color_success()
+            } else {
+                color_warning()
+            },
+        ),
+        activity_item(
+            format!("Last run: {}", last_run_label(model)),
+            last_run_color(model),
+        ),
+        activity_item(
+            format!("Next run: {}", next_run_label(model)),
+            if model.next_run_at.is_some() {
+                color_neutral()
+            } else {
+                color_muted()
+            },
+        ),
+        activity_item(
+            format!(
+                "Recent error: {}",
+                model.recent_error.as_deref().unwrap_or("-")
+            ),
+            if model.recent_error.is_some() {
+                color_danger()
+            } else {
+                color_muted()
+            },
+        ),
+        activity_item(
+            format!(
+                "App message: {}",
+                model.last_message.as_deref().unwrap_or("-")
+            ),
+            if model.last_message.is_some() {
+                color_neutral()
+            } else {
+                color_muted()
+            },
         ),
     ];
-    let items = items
-        .into_iter()
-        .map(|item| ListItem::new(item).style(Style::default().fg(Color::White)))
-        .collect::<Vec<_>>();
 
     frame.render_widget(List::new(items).block(chrome_block("Activity")), area);
 }
@@ -2741,18 +2792,18 @@ fn render_runs_screen(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
 fn render_runs_table(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     let visible_runs = model.visible_runs();
     if visible_runs.is_empty() {
-        let message = if model.runs.is_empty() {
-            "No sync runs recorded yet."
+        let lines: &[&str] = if model.runs.is_empty() {
+            &[
+                "No sync runs recorded yet.",
+                "Run a dry-run or apply sync to populate this history.",
+            ]
         } else {
-            "No sync runs match this filter."
+            &[
+                "No sync runs match this filter.",
+                "Press f to cycle through failed, running, completed, and all.",
+            ]
         };
-        frame.render_widget(
-            Paragraph::new(message)
-                .block(chrome_block("Sync Runs"))
-                .alignment(Alignment::Center)
-                .wrap(Wrap { trim: true }),
-            area,
-        );
+        render_empty_state(frame, area, "Sync Runs", lines, color_warning());
         return;
     }
 
@@ -2771,7 +2822,7 @@ fn render_runs_table(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
         .header(
             Row::new(["", "Status", "Pair", "Started"]).style(
                 Style::default()
-                    .fg(Color::Gray)
+                    .fg(color_muted())
                     .add_modifier(Modifier::BOLD),
             ),
         )
@@ -2790,7 +2841,7 @@ fn render_runs_table(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
         .header(
             Row::new(["", "Status", "Pair", "Started", "Finished", "Error"]).style(
                 Style::default()
-                    .fg(Color::Gray)
+                    .fg(color_muted())
                     .add_modifier(Modifier::BOLD),
             ),
         )
@@ -2805,7 +2856,7 @@ fn run_row(run: &AppRun, model: &AppModel, compact: bool) -> Row<'static> {
     let marker = if selected { ">" } else { " " };
     let style = if selected {
         Style::default()
-            .fg(Color::Cyan)
+            .fg(color_running())
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(run_status_color(&run.status))
@@ -2882,10 +2933,17 @@ fn render_run_detail(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
             ]
         }
     } else {
-        vec![
-            Line::from("No run selected."),
-            Line::from("Use f to change the filter or run insync sync."),
-        ]
+        render_empty_state(
+            frame,
+            area,
+            "Run Detail",
+            &[
+                "No run selected.",
+                "Use f to change the filter or run insync sync.",
+            ],
+            color_warning(),
+        );
+        return;
     };
 
     frame.render_widget(
@@ -2908,28 +2966,28 @@ fn render_command_bar(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
         Span::styled(
             "a",
             Style::default()
-                .fg(Color::Yellow)
+                .fg(color_danger())
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" apply   "),
         Span::styled(
             "r",
             Style::default()
-                .fg(Color::Green)
+                .fg(color_warning())
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" conflicts   "),
         Span::styled(
             "s",
             Style::default()
-                .fg(Color::Magenta)
+                .fg(color_neutral())
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" setup   "),
         Span::styled(
             "l",
             Style::default()
-                .fg(Color::Green)
+                .fg(color_success())
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" runs   "),
@@ -2947,7 +3005,7 @@ fn render_command_bar(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
             Span::styled(
                 "f",
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(color_warning())
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" filter   "),
@@ -2978,12 +3036,47 @@ fn render_command_bar(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     );
 }
 
+fn render_empty_state(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &str,
+    lines: &[&str],
+    color: Color,
+) {
+    let lines = lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            if index == 0 {
+                Line::from(Span::styled(
+                    *line,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                Line::from(Span::styled(*line, Style::default().fg(color_muted())))
+            }
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(chrome_block(title))
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
+fn activity_item(value: String, color: Color) -> ListItem<'static> {
+    ListItem::new(value).style(Style::default().fg(color))
+}
+
 fn chrome_block<'a>(title: &'a str) -> Block<'a> {
     Block::default()
         .title(title)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .border_style(Style::default().fg(color_muted()))
 }
 
 fn status_label(status: AppStatus) -> &'static str {
@@ -2997,10 +3090,10 @@ fn status_label(status: AppStatus) -> &'static str {
 
 fn status_color(status: AppStatus) -> Color {
     match status {
-        AppStatus::Idle => Color::Gray,
-        AppStatus::Checking => Color::Blue,
-        AppStatus::Syncing => Color::Cyan,
-        AppStatus::Error => Color::Red,
+        AppStatus::Idle => color_neutral(),
+        AppStatus::Checking => color_checking(),
+        AppStatus::Syncing => color_running(),
+        AppStatus::Error => color_danger(),
     }
 }
 
@@ -3013,11 +3106,56 @@ fn view_label(view: AppView) -> &'static str {
 
 fn run_status_color(status: &str) -> Color {
     match status {
-        "failed" => Color::Red,
-        "completed" => Color::Green,
-        "running" => Color::Cyan,
-        _ => Color::Gray,
+        "failed" => color_danger(),
+        "completed" => color_success(),
+        "running" => color_running(),
+        _ => color_neutral(),
     }
+}
+
+fn pair_gauge_color(model: &AppModel) -> Color {
+    if model.pairs.is_empty() {
+        color_muted()
+    } else if model.enabled_pair_count() == model.pairs.len() {
+        color_success()
+    } else {
+        color_warning()
+    }
+}
+
+fn last_run_color(model: &AppModel) -> Color {
+    match model.last_run_status.as_deref() {
+        Some(status) => run_status_color(status),
+        None => color_muted(),
+    }
+}
+
+fn color_neutral() -> Color {
+    Color::Gray
+}
+
+fn color_muted() -> Color {
+    Color::DarkGray
+}
+
+fn color_checking() -> Color {
+    Color::Blue
+}
+
+fn color_running() -> Color {
+    Color::Cyan
+}
+
+fn color_success() -> Color {
+    Color::Green
+}
+
+fn color_warning() -> Color {
+    Color::Yellow
+}
+
+fn color_danger() -> Color {
+    Color::Red
 }
 
 fn last_run_label(model: &AppModel) -> String {
