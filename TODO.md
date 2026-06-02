@@ -88,11 +88,11 @@ future interchangeable taskbar/menu-bar interface.
 - [x] Implement Google calendar list, event list, create, update, delete.
 - [x] Implement iCloud CalDAV calendar discovery.
 - [x] Implement iCloud event list, create, update, delete.
-- [ ] Port iCloud cross-calendar UID collision probing and metadata reuse from
+- [x] Port iCloud cross-calendar UID collision probing and metadata reuse from
       the TypeScript provider.
 - [x] Add typed provider errors for auth, rate limits, precondition failures,
       UID collisions, network failures, and mapping failures.
-- [ ] Emit UID collision errors from iCloud cross-calendar collision probing.
+- [x] Emit UID collision errors from iCloud cross-calendar collision probing.
 - [x] Add retry/backoff policy for transient provider errors.
 - [ ] Add provider integration tests that can run against fixtures/mocks by
       default and real accounts only when explicitly enabled.
@@ -200,7 +200,7 @@ border.
 - [x] Implement daemon mode with interval scheduling.
 - [x] Add graceful shutdown on Ctrl-C/signals.
 - [ ] Add retry/backoff and jitter for transient failures.
-- [ ] Add sync lock acquisition and lock expiry handling.
+- [x] Add sync lock acquisition and lock expiry handling.
 - [ ] Add `launchd` support for macOS user agents.
 - [ ] Add `systemd --user` support for Linux.
 - [ ] Investigate Windows scheduled task/service support.

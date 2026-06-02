@@ -328,9 +328,45 @@ impl CalendarProvider for IcloudCalDavProvider {
         let href = calendar_url
             .join(&filename)
             .map_err(|error| ProviderError::Request(error.to_string()))?;
-        let etag = self
+        let etag = match self
             .put_object(href.clone(), canonical_to_ical(event), None, true)
-            .await?;
+            .await
+        {
+            Ok(etag) => etag,
+            Err(ProviderError::PreconditionFailed(ProviderName::Icloud)) => {
+                let target_objects = self.fetch_objects(calendar_id).await?;
+                if let Some(existing) = find_existing_event_meta(
+                    calendar_id,
+                    &target_objects,
+                    &event.canonical_uid,
+                    Some(href.as_str()),
+                )? {
+                    return Ok(existing);
+                }
+                if let Some(existing) = find_existing_event_meta(
+                    calendar_id,
+                    &target_objects,
+                    &event.canonical_uid,
+                    None,
+                )? {
+                    return Ok(existing);
+                }
+                if self
+                    .find_existing_event_in_any_calendar(calendar_id, &event.canonical_uid)
+                    .await?
+                    .is_some()
+                {
+                    return Err(ProviderError::UidCollision {
+                        provider: ProviderName::Icloud,
+                        calendar_id: calendar_id.to_string(),
+                        uid: event.canonical_uid.clone(),
+                    });
+                }
+
+                return Err(ProviderError::PreconditionFailed(ProviderName::Icloud));
+            }
+            Err(error) => return Err(error),
+        };
 
         Ok(ical_meta_from_object(
             calendar_id,
@@ -399,6 +435,52 @@ impl CalendarProvider for IcloudCalDavProvider {
 
         Ok(())
     }
+}
+
+impl IcloudCalDavProvider {
+    async fn find_existing_event_in_any_calendar(
+        &self,
+        target_calendar_id: &str,
+        canonical_uid: &str,
+    ) -> Result<Option<String>, ProviderError> {
+        for calendar in self.fetch_calendars().await? {
+            if calendar.url == target_calendar_id {
+                continue;
+            }
+
+            let objects = self.fetch_objects(&calendar.url).await?;
+            if find_existing_event_meta(&calendar.url, &objects, canonical_uid, None)?.is_some() {
+                return Ok(Some(calendar.url));
+            }
+        }
+
+        Ok(None)
+    }
+}
+
+fn find_existing_event_meta(
+    calendar_id: &str,
+    objects: &[CalendarObject],
+    canonical_uid: &str,
+    expected_href: Option<&str>,
+) -> Result<Option<ProviderEventMeta>, ProviderError> {
+    for object in objects {
+        if let Some(expected_href) = expected_href
+            && object.url != expected_href
+        {
+            continue;
+        }
+
+        let events = ical_object_to_canonical(calendar_id, object.clone())?;
+        if let Some(event) = events
+            .into_iter()
+            .find(|event| event.canonical_uid == canonical_uid && !event.provider_meta.deleted)
+        {
+            return Ok(Some(event.provider_meta));
+        }
+    }
+
+    Ok(None)
 }
 
 fn parse_multistatus(xml: &str) -> Vec<DavResponse> {
@@ -582,6 +664,44 @@ mod tests {
                 .unwrap_or_default()
                 .contains("BEGIN:VCALENDAR")
         );
+    }
+
+    #[test]
+    fn finds_existing_event_meta_by_uid_and_href() {
+        let objects = vec![CalendarObject {
+            url: "https://caldav.example/cal/uid-1.ics".to_string(),
+            etag: Some("\"etag-1\"".to_string()),
+            data: Some(
+                [
+                    "BEGIN:VCALENDAR",
+                    "VERSION:2.0",
+                    "BEGIN:VEVENT",
+                    "UID:uid-1",
+                    "SUMMARY:Planning",
+                    "DTSTART:20260601T120000Z",
+                    "DTEND:20260601T130000Z",
+                    "END:VEVENT",
+                    "END:VCALENDAR",
+                ]
+                .join("\r\n"),
+            ),
+        }];
+
+        let meta = find_existing_event_meta(
+            "https://caldav.example/cal/",
+            &objects,
+            "uid-1",
+            Some("https://caldav.example/cal/uid-1.ics"),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            meta.href.as_deref(),
+            Some("https://caldav.example/cal/uid-1.ics")
+        );
+        assert_eq!(meta.etag.as_deref(), Some("\"etag-1\""));
+        assert_eq!(meta.ical_uid.as_deref(), Some("uid-1"));
     }
 
     #[test]

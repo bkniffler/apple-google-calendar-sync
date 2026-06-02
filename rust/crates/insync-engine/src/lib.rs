@@ -31,12 +31,16 @@ use std::{
     future::Future,
     io::Write,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use thiserror::Error;
 use tokio::time;
 
 const PROVIDER_RETRY_ATTEMPTS: usize = 3;
+#[cfg(not(test))]
+const LOCK_STALE_AFTER: Duration = Duration::from_secs(6 * 60 * 60);
+#[cfg(test)]
+const LOCK_STALE_AFTER: Duration = Duration::from_millis(100);
 
 pub use insync_db::repositories::sync_conflicts::{
     ConflictFilter, UnresolvedConflictRow, UnresolvedConflictSummary,
@@ -340,8 +344,11 @@ impl SyncEngine {
                 });
 
                 if mode == RunMode::Apply {
-                    apply_actions(&conn, &self.config, pair, providers, &actions).await?;
-                    resolve_stale_conflicts(&conn, &pair.id, &active_manual_conflicts(&actions))?;
+                    let mut active_conflicts = active_manual_conflicts(&actions);
+                    active_conflicts.extend(
+                        apply_actions(&conn, &self.config, pair, providers, &actions).await?,
+                    );
+                    resolve_stale_conflicts(&conn, &pair.id, &active_conflicts)?;
                     update_calendar_sync_token(
                         &conn,
                         &ids.google_calendar_id,
@@ -629,7 +636,9 @@ async fn apply_actions(
     pair: &SyncPairConfig,
     providers: SyncProviders<'_>,
     actions: &[PlannedAction],
-) -> Result<(), EngineError> {
+) -> Result<Vec<ActiveConflict>, EngineError> {
+    let mut provider_detected_conflicts = Vec::new();
+
     for action in actions {
         match action {
             PlannedAction::Snapshot {
@@ -672,12 +681,44 @@ async fn apply_actions(
                 upsert_event_link(conn, link_after_google_write(&pair.id, action, meta))?;
             }
             PlannedAction::CreateIcloud(action) => {
-                let meta = with_provider_retry(|| {
+                let meta = match with_provider_retry(|| {
                     providers
                         .icloud
                         .create_event(&pair.icloud_calendar_id, &action.event)
                 })
-                .await?;
+                .await
+                {
+                    Ok(meta) => meta,
+                    Err(ProviderError::UidCollision {
+                        provider: ProviderName::Icloud,
+                        ..
+                    }) => {
+                        record_conflict(
+                            conn,
+                            RecordConflictInput {
+                                sync_pair_id: pair.id.clone(),
+                                event_link_id: action.link.as_ref().map(|link| link.id.clone()),
+                                canonical_uid: action.canonical_uid.clone(),
+                                reason: "icloud_uid_exists_in_different_calendar".to_string(),
+                                google_snapshot: action
+                                    .google
+                                    .as_deref()
+                                    .or(Some(&action.event))
+                                    .and_then(|event| serde_json::to_value(event).ok()),
+                                icloud_snapshot: action
+                                    .icloud
+                                    .as_deref()
+                                    .and_then(|event| serde_json::to_value(event).ok()),
+                            },
+                        )?;
+                        provider_detected_conflicts.push(ActiveConflict {
+                            canonical_uid: action.canonical_uid.clone(),
+                            reason: "icloud_uid_exists_in_different_calendar".to_string(),
+                        });
+                        continue;
+                    }
+                    Err(error) => return Err(error.into()),
+                };
                 upsert_event_link(conn, link_after_icloud_write(&pair.id, action, meta))?;
             }
             PlannedAction::UpdateGoogle(action) => {
@@ -800,7 +841,7 @@ async fn apply_actions(
     }
 
     let _ = config;
-    Ok(())
+    Ok(provider_detected_conflicts)
 }
 
 fn link_after_google_write(
@@ -974,26 +1015,62 @@ fn acquire_sync_lock(db_path: &Path) -> Result<SyncLock, EngineError> {
             .map(|value| format!("{value}."))
             .unwrap_or_default()
     ));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&lock_path)
-        .map_err(|source| {
-            if source.kind() == std::io::ErrorKind::AlreadyExists {
-                EngineError::LockAlreadyHeld(lock_path.clone())
+    let mut file = match create_lock_file(&lock_path) {
+        Ok(file) => file,
+        Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+            if lock_path_is_stale(&lock_path) {
+                let _ = fs::remove_file(&lock_path);
+                create_lock_file(&lock_path).map_err(|source| {
+                    if source.kind() == std::io::ErrorKind::AlreadyExists {
+                        EngineError::LockAlreadyHeld(lock_path.clone())
+                    } else {
+                        EngineError::LockCreate {
+                            path: lock_path.clone(),
+                            source,
+                        }
+                    }
+                })?
             } else {
-                EngineError::LockCreate {
-                    path: lock_path.clone(),
-                    source,
-                }
+                return Err(EngineError::LockAlreadyHeld(lock_path.clone()));
             }
-        })?;
+        }
+        Err(source) => {
+            return Err(EngineError::LockCreate {
+                path: lock_path.clone(),
+                source,
+            });
+        }
+    };
     writeln!(file, "pid={}", std::process::id()).map_err(|source| EngineError::LockCreate {
         path: lock_path.clone(),
         source,
     })?;
 
     Ok(SyncLock { path: lock_path })
+}
+
+fn create_lock_file(lock_path: &Path) -> std::io::Result<std::fs::File> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(lock_path)
+}
+
+fn lock_path_is_stale(lock_path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(lock_path) else {
+        return false;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+
+    lock_file_is_stale(modified, SystemTime::now())
+}
+
+fn lock_file_is_stale(modified: SystemTime, now: SystemTime) -> bool {
+    now.duration_since(modified)
+        .map(|age| age > LOCK_STALE_AFTER)
+        .unwrap_or(false)
 }
 
 fn active_manual_conflicts(actions: &[PlannedAction]) -> Vec<ActiveConflict> {
@@ -1489,6 +1566,36 @@ mod tests {
         std::fs::remove_dir_all(&temp_dir).unwrap();
     }
 
+    #[test]
+    fn lock_age_detection_marks_only_old_locks_stale() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+
+        assert!(!lock_file_is_stale(now, now));
+        assert!(lock_file_is_stale(
+            now - LOCK_STALE_AFTER - Duration::from_millis(1),
+            now
+        ));
+    }
+
+    #[test]
+    fn sync_lock_reclaims_stale_lock_file() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("insync-engine-stale-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let db_path = temp_dir.join("insync.db");
+        let lock_path = db_path.with_extension("db.lock");
+        std::fs::write(&lock_path, "pid=dead\n").unwrap();
+        std::thread::sleep(LOCK_STALE_AFTER + Duration::from_millis(20));
+
+        let _lock = acquire_sync_lock(&db_path).unwrap();
+        let body = std::fs::read_to_string(&lock_path).unwrap();
+
+        assert!(body.contains(&format!("pid={}", std::process::id())));
+
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
     #[tokio::test]
     async fn provider_planning_creates_missing_icloud_event() {
         let temp_dir =
@@ -1834,6 +1941,50 @@ mod tests {
             conflicts[0].reason,
             "unlinked_events_have_same_uid_but_differ"
         );
+
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn provider_apply_records_icloud_uid_collision_conflict() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "insync-engine-apply-uid-collision-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let config_path = temp_dir.join("insync.json");
+        let config = config_with_db(".state/insync.db");
+        let engine = SyncEngine::with_config_path(config, &config_path);
+        let google = FakeProvider {
+            name: ProviderName::Google,
+            events: vec![event("uid-1", "Collision", ProviderName::Google)],
+        };
+        let icloud = UidCollisionProvider {
+            name: ProviderName::Icloud,
+        };
+
+        let summary = engine
+            .plan_once_with_providers(
+                RunMode::Apply,
+                SyncProviders {
+                    google: &google,
+                    icloud: &icloud,
+                },
+            )
+            .await
+            .unwrap();
+        let conflicts = engine.conflict_details(ConflictFilter::default()).unwrap();
+        let latest_run = engine.doctor().unwrap().latest_run.unwrap();
+
+        assert_eq!(summary.action_counts.get("create_icloud"), Some(&1));
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].canonical_uid.as_deref(), Some("uid-1"));
+        assert_eq!(
+            conflicts[0].reason,
+            "icloud_uid_exists_in_different_calendar"
+        );
+        assert_eq!(latest_run.status, "completed");
 
         std::fs::remove_dir_all(&temp_dir).unwrap();
     }
@@ -2338,6 +2489,66 @@ mod tests {
             _etag: Option<&str>,
         ) -> Result<ProviderEventMeta, ProviderError> {
             Ok(meta(self.inner.name, calendar_id, event))
+        }
+
+        async fn delete_event(
+            &self,
+            _calendar_id: &str,
+            _remote_event_id: &str,
+            _etag: Option<&str>,
+        ) -> Result<(), ProviderError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct UidCollisionProvider {
+        name: ProviderName,
+    }
+
+    #[async_trait::async_trait]
+    impl CalendarProvider for UidCollisionProvider {
+        fn name(&self) -> ProviderName {
+            self.name
+        }
+
+        async fn list_calendars(&self) -> Result<Vec<ProviderCalendar>, ProviderError> {
+            Ok(Vec::new())
+        }
+
+        async fn get_changes(
+            &self,
+            calendar_id: &str,
+            _cursor: ProviderSyncCursor,
+        ) -> Result<ProviderChangeSet, ProviderError> {
+            Ok(ProviderChangeSet {
+                provider: self.name,
+                calendar_id: calendar_id.to_string(),
+                sync_token: None,
+                events: Vec::new(),
+            })
+        }
+
+        async fn create_event(
+            &self,
+            calendar_id: &str,
+            event: &CanonicalEvent,
+        ) -> Result<ProviderEventMeta, ProviderError> {
+            Err(ProviderError::UidCollision {
+                provider: self.name,
+                calendar_id: calendar_id.to_string(),
+                uid: event.canonical_uid.clone(),
+            })
+        }
+
+        async fn update_event(
+            &self,
+            calendar_id: &str,
+            _remote_event_id: &str,
+            event: &CanonicalEvent,
+            _etag: Option<&str>,
+        ) -> Result<ProviderEventMeta, ProviderError> {
+            Ok(meta(self.name, calendar_id, event))
         }
 
         async fn delete_event(
