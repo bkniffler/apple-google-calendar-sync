@@ -38,6 +38,9 @@ use thiserror::Error;
 use tokio::time;
 
 const PROVIDER_RETRY_ATTEMPTS: usize = 3;
+const DAEMON_RETRY_BASE: Duration = Duration::from_secs(5);
+const DAEMON_RETRY_CAP: Duration = Duration::from_secs(5 * 60);
+const DAEMON_RETRY_JITTER_CAP: Duration = Duration::from_secs(5);
 #[cfg(not(test))]
 const LOCK_STALE_AFTER: Duration = Duration::from_secs(6 * 60 * 60);
 #[cfg(test)]
@@ -429,13 +432,30 @@ impl SyncEngine {
     ) -> Result<(), EngineError> {
         let interval = Duration::from_secs(self.config.sync.poll_interval_seconds);
         tokio::pin!(shutdown);
+        let mut failures = 0_u32;
 
         loop {
-            self.run_once(mode).await?;
+            let delay = match self.run_once(mode).await {
+                Ok(_) => {
+                    failures = 0;
+                    interval
+                }
+                Err(error) => {
+                    failures = failures.saturating_add(1);
+                    let delay = daemon_retry_delay(failures, interval);
+                    tracing::warn!(
+                        %error,
+                        failures,
+                        retry_after_seconds = delay.as_secs(),
+                        "daemon sync tick failed"
+                    );
+                    delay
+                }
+            };
 
             tokio::select! {
                 _ = &mut shutdown => return Ok(()),
-                _ = time::sleep(interval) => {}
+                _ = time::sleep(delay) => {}
             }
         }
     }
@@ -448,13 +468,30 @@ impl SyncEngine {
     ) -> Result<(), EngineError> {
         let interval = Duration::from_secs(self.config.sync.poll_interval_seconds);
         tokio::pin!(shutdown);
+        let mut failures = 0_u32;
 
         loop {
-            self.plan_once_with_providers(mode, providers).await?;
+            let delay = match self.plan_once_with_providers(mode, providers).await {
+                Ok(_) => {
+                    failures = 0;
+                    interval
+                }
+                Err(error) => {
+                    failures = failures.saturating_add(1);
+                    let delay = daemon_retry_delay(failures, interval);
+                    tracing::warn!(
+                        %error,
+                        failures,
+                        retry_after_seconds = delay.as_secs(),
+                        "daemon sync tick failed"
+                    );
+                    delay
+                }
+            };
 
             tokio::select! {
                 _ = &mut shutdown => return Ok(()),
-                _ = time::sleep(interval) => {}
+                _ = time::sleep(delay) => {}
             }
         }
     }
@@ -640,6 +677,41 @@ fn is_transient_provider_error(error: &ProviderError) -> bool {
         ProviderError::Http { status, .. } => (500..600).contains(status),
         _ => false,
     }
+}
+
+fn daemon_retry_delay(failure_count: u32, poll_interval: Duration) -> Duration {
+    daemon_retry_delay_with_jitter(failure_count, poll_interval, daemon_jitter_seed())
+}
+
+fn daemon_retry_delay_with_jitter(
+    failure_count: u32,
+    poll_interval: Duration,
+    jitter_seed_millis: u64,
+) -> Duration {
+    let exponent = failure_count.saturating_sub(1).min(6);
+    let backoff = DAEMON_RETRY_BASE.saturating_mul(2_u32.saturating_pow(exponent));
+    let capped_backoff = backoff.min(DAEMON_RETRY_CAP).min(poll_interval);
+    let jitter_cap = DAEMON_RETRY_JITTER_CAP.min(capped_backoff);
+    let jitter_millis = if jitter_cap.is_zero() {
+        0
+    } else {
+        jitter_seed_millis % u64::try_from(jitter_cap.as_millis()).unwrap_or(u64::MAX)
+    };
+
+    capped_backoff + Duration::from_millis(jitter_millis)
+}
+
+#[cfg(not(test))]
+fn daemon_jitter_seed() -> u64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| u64::from(duration.subsec_millis()))
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+fn daemon_jitter_seed() -> u64 {
+    0
 }
 
 #[cfg(not(test))]
@@ -2067,6 +2139,18 @@ mod tests {
         assert_eq!(latest_run.status, "completed");
 
         std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn daemon_retry_delay_backs_off_caps_and_adds_jitter() {
+        assert_eq!(
+            daemon_retry_delay_with_jitter(1, Duration::from_secs(300), 1234),
+            Duration::from_millis(6234)
+        );
+        assert_eq!(
+            daemon_retry_delay_with_jitter(8, Duration::from_secs(120), 4999),
+            Duration::from_millis(124_999)
+        );
     }
 
     #[tokio::test]

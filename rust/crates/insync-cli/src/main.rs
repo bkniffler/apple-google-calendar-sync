@@ -40,10 +40,11 @@ use ratatui::{
 };
 use serde::Deserialize;
 use std::{
-    fs,
+    env, fs,
     io::{self, Read, Write},
     net::{TcpListener, TcpStream},
-    path::PathBuf,
+    path::{Path, PathBuf},
+    process::Command as ProcessCommand,
     time::Duration,
 };
 use tracing_subscriber::EnvFilter;
@@ -155,8 +156,42 @@ enum Command {
         #[arg(long, help = "Execute provider writes on each daemon tick")]
         apply: bool,
     },
+    #[command(about = "Install, remove, inspect, or print background runner services")]
+    Background {
+        #[command(subcommand)]
+        command: BackgroundCommand,
+    },
     #[command(about = "Open the terminal dashboard")]
     Tui,
+}
+
+#[derive(Debug, Subcommand)]
+enum BackgroundCommand {
+    #[command(about = "Install and start a macOS launchd or Linux systemd user service")]
+    Install {
+        #[arg(long, help = "Execute provider writes on each daemon tick")]
+        apply: bool,
+        #[arg(long, help = "Replace an existing service definition")]
+        force: bool,
+    },
+    #[command(about = "Stop and remove the installed background service")]
+    Uninstall,
+    #[command(about = "Print background service health and scheduler status")]
+    Status,
+    #[command(about = "Print the service definition without installing it")]
+    Print {
+        #[arg(long, value_enum, default_value_t = BackgroundTemplate::Auto)]
+        template: BackgroundTemplate,
+        #[arg(long, help = "Render daemon arguments with --apply")]
+        apply: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum BackgroundTemplate {
+    Auto,
+    Launchd,
+    Systemd,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -526,6 +561,22 @@ async fn main() -> Result<()> {
                 )
                 .await?;
         }
+        Command::Background { command } => match command {
+            BackgroundCommand::Install { apply, force } => {
+                let (config_path, _) = load_validated_config(config)?;
+                install_background_service(&config_path, apply, force)?;
+            }
+            BackgroundCommand::Uninstall => {
+                uninstall_background_service()?;
+            }
+            BackgroundCommand::Status => {
+                print_background_status()?;
+            }
+            BackgroundCommand::Print { template, apply } => {
+                let (config_path, _) = load_validated_config(config)?;
+                print_background_template(template, &config_path, apply)?;
+            }
+        },
         Command::Tui => {
             let (config_path, config) = load_validated_config(config)?;
             let engine = SyncEngine::with_config_path(config.clone(), &config_path);
@@ -548,6 +599,500 @@ fn load_validated_config(
     validate_config(&config)
         .wrap_err_with(|| format!("validating config {}", config_path.display()))?;
     Ok((config_path, config))
+}
+
+const BACKGROUND_LABEL: &str = "dev.bkniffler.insync";
+const SYSTEMD_UNIT_NAME: &str = "insync.service";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackgroundPlatform {
+    Launchd,
+    Systemd,
+}
+
+fn install_background_service(config_path: &Path, apply: bool, force: bool) -> Result<()> {
+    match current_background_platform()? {
+        BackgroundPlatform::Launchd => install_launchd_service(config_path, apply, force),
+        BackgroundPlatform::Systemd => install_systemd_service(config_path, apply, force),
+    }
+}
+
+fn uninstall_background_service() -> Result<()> {
+    match current_background_platform()? {
+        BackgroundPlatform::Launchd => uninstall_launchd_service(),
+        BackgroundPlatform::Systemd => uninstall_systemd_service(),
+    }
+}
+
+fn print_background_status() -> Result<()> {
+    match current_background_platform()? {
+        BackgroundPlatform::Launchd => print_launchd_status(),
+        BackgroundPlatform::Systemd => print_systemd_status(),
+    }
+}
+
+fn print_background_template(
+    template: BackgroundTemplate,
+    config_path: &Path,
+    apply: bool,
+) -> Result<()> {
+    let platform = match template {
+        BackgroundTemplate::Auto => current_background_platform()?,
+        BackgroundTemplate::Launchd => BackgroundPlatform::Launchd,
+        BackgroundTemplate::Systemd => BackgroundPlatform::Systemd,
+    };
+    let binary_path = current_binary_path()?;
+    let config_path = absolute_config_path(config_path)?;
+
+    match platform {
+        BackgroundPlatform::Launchd => {
+            let logs = launchd_log_paths()?;
+            print!(
+                "{}",
+                render_launchd_plist(&binary_path, &config_path, apply, &logs)
+            );
+        }
+        BackgroundPlatform::Systemd => {
+            print!("{}", render_systemd_unit(&binary_path, &config_path, apply));
+        }
+    }
+
+    Ok(())
+}
+
+fn current_background_platform() -> Result<BackgroundPlatform> {
+    match env::consts::OS {
+        "macos" => Ok(BackgroundPlatform::Launchd),
+        "linux" => Ok(BackgroundPlatform::Systemd),
+        "windows" => bail!(
+            "Windows background install is not implemented yet; use a scheduled task that runs `insync daemon --apply` for now"
+        ),
+        other => bail!("background install is not supported on {other}"),
+    }
+}
+
+fn install_launchd_service(config_path: &Path, apply: bool, force: bool) -> Result<()> {
+    let plist_path = launchd_plist_path()?;
+    if plist_path.exists() && !force {
+        bail!(
+            "{} already exists; rerun with --force to replace it",
+            plist_path.display()
+        );
+    }
+
+    let binary_path = current_binary_path()?;
+    let config_path = absolute_config_path(config_path)?;
+    let logs = launchd_log_paths()?;
+    fs::create_dir_all(&logs.dir)?;
+    write_text(
+        &plist_path,
+        &render_launchd_plist(&binary_path, &config_path, apply, &logs),
+    )?;
+
+    let domain = launchd_domain()?;
+    let _ = run_command_output(
+        "launchctl",
+        vec![
+            "bootout".to_string(),
+            domain.clone(),
+            plist_path_display(&plist_path),
+        ],
+    );
+    run_command_checked(
+        "launchctl",
+        vec![
+            "bootstrap".to_string(),
+            domain.clone(),
+            plist_path_display(&plist_path),
+        ],
+    )?;
+    run_command_checked(
+        "launchctl",
+        vec!["enable".to_string(), format!("{domain}/{BACKGROUND_LABEL}")],
+    )?;
+
+    println!("installed launchd user agent: {}", plist_path.display());
+    println!("logs: {}", logs.dir.display());
+    println!("status: insync background status");
+    Ok(())
+}
+
+fn uninstall_launchd_service() -> Result<()> {
+    let plist_path = launchd_plist_path()?;
+    let domain = launchd_domain()?;
+    let _ = run_command_output(
+        "launchctl",
+        vec![
+            "bootout".to_string(),
+            domain,
+            plist_path_display(&plist_path),
+        ],
+    );
+
+    if plist_path.exists() {
+        fs::remove_file(&plist_path)
+            .wrap_err_with(|| format!("removing {}", plist_path.display()))?;
+    }
+
+    println!("removed launchd user agent: {}", plist_path.display());
+    Ok(())
+}
+
+fn print_launchd_status() -> Result<()> {
+    let plist_path = launchd_plist_path()?;
+    let logs = launchd_log_paths()?;
+    println!("platform: launchd");
+    println!("label: {BACKGROUND_LABEL}");
+    println!("definition: {}", plist_path.display());
+    println!("logs: {}", logs.dir.display());
+
+    let domain = launchd_domain()?;
+    let output = run_command_output(
+        "launchctl",
+        vec!["print".to_string(), format!("{domain}/{BACKGROUND_LABEL}")],
+    )?;
+    print_command_output(&output);
+    Ok(())
+}
+
+fn install_systemd_service(config_path: &Path, apply: bool, force: bool) -> Result<()> {
+    let unit_path = systemd_unit_path()?;
+    if unit_path.exists() && !force {
+        bail!(
+            "{} already exists; rerun with --force to replace it",
+            unit_path.display()
+        );
+    }
+
+    let binary_path = current_binary_path()?;
+    let config_path = absolute_config_path(config_path)?;
+    write_text(
+        &unit_path,
+        &render_systemd_unit(&binary_path, &config_path, apply),
+    )?;
+
+    run_command_checked("systemctl", ["--user", "daemon-reload"])?;
+    run_command_checked(
+        "systemctl",
+        ["--user", "enable", "--now", SYSTEMD_UNIT_NAME],
+    )?;
+
+    println!("installed systemd user service: {}", unit_path.display());
+    println!("logs: journalctl --user -u {SYSTEMD_UNIT_NAME}");
+    println!("status: insync background status");
+    Ok(())
+}
+
+fn uninstall_systemd_service() -> Result<()> {
+    let unit_path = systemd_unit_path()?;
+    let _ = run_command_output(
+        "systemctl",
+        ["--user", "disable", "--now", SYSTEMD_UNIT_NAME],
+    );
+
+    if unit_path.exists() {
+        fs::remove_file(&unit_path)
+            .wrap_err_with(|| format!("removing {}", unit_path.display()))?;
+    }
+
+    let _ = run_command_output("systemctl", ["--user", "daemon-reload"]);
+    println!("removed systemd user service: {}", unit_path.display());
+    Ok(())
+}
+
+fn print_systemd_status() -> Result<()> {
+    let unit_path = systemd_unit_path()?;
+    println!("platform: systemd --user");
+    println!("unit: {SYSTEMD_UNIT_NAME}");
+    println!("definition: {}", unit_path.display());
+    println!("logs: journalctl --user -u {SYSTEMD_UNIT_NAME}");
+
+    let output = run_command_output("systemctl", ["--user", "status", SYSTEMD_UNIT_NAME])?;
+    print_command_output(&output);
+    Ok(())
+}
+
+fn render_launchd_plist(
+    binary_path: &Path,
+    config_path: &Path,
+    apply: bool,
+    logs: &LaunchdLogPaths,
+) -> String {
+    let args = daemon_arguments(binary_path, config_path, apply);
+    let program_arguments = args
+        .iter()
+        .map(|arg| format!("        <string>{}</string>", xml_escape(arg)))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{}</string>
+    <key>ProgramArguments</key>
+    <array>
+{}
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>{}</string>
+    <key>StandardErrorPath</key>
+    <string>{}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+</dict>
+</plist>
+"#,
+        xml_escape(BACKGROUND_LABEL),
+        program_arguments,
+        xml_escape(&logs.stdout.to_string_lossy()),
+        xml_escape(&logs.stderr.to_string_lossy())
+    )
+}
+
+fn render_systemd_unit(binary_path: &Path, config_path: &Path, apply: bool) -> String {
+    let exec_start = daemon_arguments(binary_path, config_path, apply)
+        .iter()
+        .map(|arg| systemd_escape_arg(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    format!(
+        r#"[Unit]
+Description=insync calendar sync daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={}
+Restart=on-failure
+RestartSec=30
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target
+"#,
+        exec_start
+    )
+}
+
+fn daemon_arguments(binary_path: &Path, config_path: &Path, apply: bool) -> Vec<String> {
+    let mut args = vec![
+        binary_path.to_string_lossy().into_owned(),
+        "--config".to_string(),
+        config_path.to_string_lossy().into_owned(),
+        "daemon".to_string(),
+    ];
+    if apply {
+        args.push("--apply".to_string());
+    }
+    args
+}
+
+fn xml_escape(value: impl AsRef<str>) -> String {
+    value
+        .as_ref()
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn systemd_escape_arg(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':' | '@'))
+    {
+        return value.to_string();
+    }
+
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn current_binary_path() -> Result<PathBuf> {
+    env::current_exe().wrap_err("resolving current insync executable")
+}
+
+fn absolute_config_path(config_path: &Path) -> Result<PathBuf> {
+    fs::canonicalize(config_path)
+        .wrap_err_with(|| format!("resolving config path {}", config_path.display()))
+}
+
+fn home_dir() -> Result<PathBuf> {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| color_eyre::eyre::eyre!("HOME is not set"))
+}
+
+fn launchd_plist_path() -> Result<PathBuf> {
+    Ok(home_dir()?
+        .join("Library")
+        .join("LaunchAgents")
+        .join(format!("{BACKGROUND_LABEL}.plist")))
+}
+
+#[derive(Debug)]
+struct LaunchdLogPaths {
+    dir: PathBuf,
+    stdout: PathBuf,
+    stderr: PathBuf,
+}
+
+fn launchd_log_paths() -> Result<LaunchdLogPaths> {
+    let dir = home_dir()?.join("Library").join("Logs").join("insync");
+    Ok(LaunchdLogPaths {
+        stdout: dir.join("daemon.out.log"),
+        stderr: dir.join("daemon.err.log"),
+        dir,
+    })
+}
+
+fn launchd_domain() -> Result<String> {
+    Ok(format!("gui/{}", current_uid()?))
+}
+
+fn current_uid() -> Result<String> {
+    let output = run_command_output("id", ["-u"])?;
+    if !output.status_success {
+        bail!("failed to determine current uid: {}", output.stderr.trim());
+    }
+
+    Ok(output.stdout.trim().to_string())
+}
+
+fn systemd_unit_path() -> Result<PathBuf> {
+    let config_home = if let Some(path) = env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
+        path
+    } else {
+        home_dir()?.join(".config")
+    };
+    Ok(config_home
+        .join("systemd")
+        .join("user")
+        .join(SYSTEMD_UNIT_NAME))
+}
+
+#[derive(Debug)]
+struct CommandOutput {
+    args: Vec<String>,
+    status_success: bool,
+    stdout: String,
+    stderr: String,
+}
+
+fn run_command_checked<I, S>(program: &str, args: I) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
+    let output = run_command_output(program, args)?;
+    if output.status_success {
+        return Ok(());
+    }
+
+    bail!(
+        "{} failed: {}",
+        command_display(program, &output.args),
+        output.stderr.trim()
+    )
+}
+
+fn run_command_output<I, S>(program: &str, args: I) -> Result<CommandOutput>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
+    let output = ProcessCommand::new(program)
+        .args(&args)
+        .output()
+        .wrap_err_with(|| format!("running {}", command_display(program, &args)))?;
+
+    Ok(CommandOutput {
+        args,
+        status_success: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    })
+}
+
+fn print_command_output(output: &CommandOutput) {
+    if !output.stdout.is_empty() {
+        print!("{}", output.stdout);
+    }
+    if !output.stderr.is_empty() {
+        eprint!("{}", output.stderr);
+    }
+    if !output.status_success {
+        println!("status: not running or unavailable");
+    }
+}
+
+fn command_display(program: &str, args: &[String]) -> String {
+    std::iter::once(program.to_string())
+        .chain(args.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn plist_path_display(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn systemd_unit_renders_daemon_arguments_and_escapes_paths() {
+        let unit = render_systemd_unit(
+            Path::new("/opt/insync/bin/insync"),
+            Path::new("/home/test/Application Support/insync.json"),
+            true,
+        );
+
+        assert!(unit.contains("Description=insync calendar sync daemon"));
+        assert!(unit.contains(
+            "ExecStart=/opt/insync/bin/insync --config \"/home/test/Application Support/insync.json\" daemon --apply"
+        ));
+        assert!(unit.contains("Restart=on-failure"));
+        assert!(unit.contains("WantedBy=default.target"));
+    }
+
+    #[test]
+    fn launchd_plist_renders_array_arguments_logs_and_xml_escapes() {
+        let logs = LaunchdLogPaths {
+            dir: PathBuf::from("/Users/test/Library/Logs/insync"),
+            stdout: PathBuf::from("/Users/test/Library/Logs/insync/out&sync.log"),
+            stderr: PathBuf::from("/Users/test/Library/Logs/insync/err.log"),
+        };
+        let plist = render_launchd_plist(
+            Path::new("/opt/in&sync/bin/insync"),
+            Path::new("/Users/test/insync<local>.json"),
+            true,
+            &logs,
+        );
+
+        assert!(plist.contains("<string>dev.bkniffler.insync</string>"));
+        assert!(plist.contains("<string>/opt/in&amp;sync/bin/insync</string>"));
+        assert!(plist.contains("<string>/Users/test/insync&lt;local&gt;.json</string>"));
+        assert!(plist.contains("<string>--apply</string>"));
+        assert!(
+            plist.contains("<string>/Users/test/Library/Logs/insync/out&amp;sync.log</string>")
+        );
+        assert!(plist.contains("<key>RunAtLoad</key>"));
+    }
 }
 
 fn setup_init(

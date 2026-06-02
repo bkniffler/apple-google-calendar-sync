@@ -163,7 +163,35 @@ insync daemon
 insync daemon --apply
 ```
 
-Daemon mode uses `sync.pollIntervalSeconds` and stops cleanly on Ctrl-C.
+Daemon mode uses `sync.pollIntervalSeconds`, stops cleanly on Ctrl-C, and keeps
+running after failed ticks with capped retry/backoff plus jitter.
+
+To install it as a user background runner:
+
+```bash
+insync background install --apply
+insync background status
+insync background uninstall
+```
+
+On macOS, `background install` writes a launchd user agent to
+`~/Library/LaunchAgents/dev.bkniffler.insync.plist` and logs to
+`~/Library/Logs/insync`. On Linux, it writes a `systemd --user` unit to
+`$XDG_CONFIG_HOME/systemd/user/insync.service` or
+`~/.config/systemd/user/insync.service`; logs are available through
+`journalctl --user -u insync.service`. The installer pins the validated config
+path with `--config` so the service does not depend on a working directory or
+shell environment. Use `--force` to replace an existing service definition.
+
+You can inspect the generated files without installing:
+
+```bash
+insync background print --template launchd --apply
+insync background print --template systemd --apply
+```
+
+Windows background service support is not implemented yet. For now, use Windows
+Task Scheduler to run `insync daemon --apply` after installing the binary.
 
 ## Conflict Maintenance
 

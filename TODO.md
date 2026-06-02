@@ -199,13 +199,13 @@ border.
 
 - [x] Implement daemon mode with interval scheduling.
 - [x] Add graceful shutdown on Ctrl-C/signals.
-- [ ] Add retry/backoff and jitter for transient failures.
+- [x] Add retry/backoff and jitter for transient failures.
 - [x] Add sync lock acquisition and lock expiry handling.
-- [ ] Add `launchd` support for macOS user agents.
-- [ ] Add `systemd --user` support for Linux.
-- [ ] Investigate Windows scheduled task/service support.
-- [ ] Add install/uninstall/status commands for background runners.
-- [ ] Add clear logs and health status for background mode.
+- [x] Add `launchd` support for macOS user agents.
+- [x] Add `systemd --user` support for Linux.
+- [x] Investigate Windows scheduled task/service support.
+- [x] Add install/uninstall/status commands for background runners.
+- [x] Add clear logs and health status for background mode.
 
 ## 13. Future Taskbar/Menu-Bar UI
 
