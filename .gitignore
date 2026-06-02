@@ -6,3 +6,5 @@ insync.local.json
 *.db-shm
 *.db-wal
 dist/
+target/
+rust/target/

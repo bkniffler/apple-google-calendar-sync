@@ -1,0 +1,39 @@
+[workspace]
+members = [
+  "crates/insync-app",
+  "crates/insync-cli",
+  "crates/insync-config",
+  "crates/insync-core",
+  "crates/insync-db",
+  "crates/insync-engine",
+  "crates/insync-providers",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/bkniffler/apple-google-calendar-sync"
+rust-version = "1.88"
+
+[workspace.dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+color-eyre = "0.6"
+crossterm = "0.29"
+directories = "6.0"
+ical = "0.11"
+keyring = { version = "3.6", features = ["apple-native", "windows-native", "sync-secret-service"] }
+ratatui = "0.29"
+quick-xml = "0.38"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.37", features = ["bundled", "chrono", "serde_json", "uuid"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["serde", "v4"] }
