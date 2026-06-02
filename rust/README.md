@@ -155,7 +155,9 @@ run detail. Calendar names are populated after setup discovery or
 consistent: neutral idle states, blue/cyan active states, green clean states,
 yellow warnings/conflicts, and red failures or destructive actions. Press `:`
 inside the TUI to open the command palette for dry-run, apply, conflict refresh,
-setup, view switching, report export, and quit actions.
+setup, view switching, report export, and quit actions. The key dashboard, run
+history, and command-palette screens have buffer-level render tests to catch
+layout regressions.
 
 ## Sync
 

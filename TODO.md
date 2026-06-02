@@ -190,7 +190,7 @@ border.
       warnings/conflicts, red for errors/destructive actions.
 - [x] Add graceful empty, loading, success, warning, and error states.
 - [x] Add responsive layouts for narrow terminals and wide terminals.
-- [ ] Add snapshot tests or golden rendering tests for key TUI screens where
+- [x] Add snapshot tests or golden rendering tests for key TUI screens where
       practical.
 - [ ] Keep the TUI connected to `insync-app` events/effects so a future
       taskbar/menu-bar shell can reuse the same control model.

@@ -7,8 +7,8 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use insync_app::{
-    AppCommand, AppEffect, AppEvent, AppModel, AppPairRuntimeSnapshot, AppRun, AppRuntimeSnapshot,
-    AppStatus, AppView,
+    AppCommand, AppEffect, AppEvent, AppModel, AppPairRuntimeSnapshot, AppRun, AppRunFilter,
+    AppRuntimeSnapshot, AppStatus, AppView,
 };
 use insync_config::{
     LOCAL_CONFIG_FILE, SecretStoreKind, SyncPairConfig, app_config_path,
@@ -1190,6 +1190,7 @@ fn plist_path_display(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::backend::TestBackend;
 
     #[test]
     fn systemd_unit_renders_daemon_arguments_and_escapes_paths() {
@@ -1229,6 +1230,107 @@ mod tests {
             plist.contains("<string>/Users/test/Library/Logs/insync/out&amp;sync.log</string>")
         );
         assert!(plist.contains("<key>RunAtLoad</key>"));
+    }
+
+    #[test]
+    fn tui_dashboard_render_covers_empty_pair_state_and_commands() {
+        let output = render_tui_to_text(&test_model(), 120, 34);
+
+        assert!(output.contains("insync"));
+        assert!(output.contains("No calendar pairs configured."));
+        assert!(output.contains("Run setup or press s"));
+        assert!(output.contains(": palette"));
+        assert!(output.contains("No runs yet"));
+    }
+
+    #[test]
+    fn tui_runs_render_covers_history_filter_and_detail() {
+        let mut model = test_model();
+        model.view = AppView::Runs;
+        model.runs = vec![
+            AppRun {
+                id: "run-failed".to_string(),
+                pair_id: Some("personal".to_string()),
+                status: "failed".to_string(),
+                started_at: "2026-06-02T12:00:00Z".to_string(),
+                finished_at: Some("2026-06-02T12:01:00Z".to_string()),
+                error: Some("auth failed".to_string()),
+            },
+            AppRun {
+                id: "run-ok".to_string(),
+                pair_id: Some("work".to_string()),
+                status: "completed".to_string(),
+                started_at: "2026-06-02T11:00:00Z".to_string(),
+                finished_at: Some("2026-06-02T11:01:00Z".to_string()),
+                error: None,
+            },
+        ];
+        model.selected_run_id = Some("run-failed".to_string());
+        model.run_filter = AppRunFilter::All;
+
+        let output = render_tui_to_text(&model, 130, 36);
+
+        assert!(output.contains("Sync Runs (2/2)"));
+        assert!(output.contains("run-failed"));
+        assert!(output.contains("personal"));
+        assert!(output.contains("auth failed"));
+        assert!(output.contains("f filter"));
+    }
+
+    #[test]
+    fn tui_command_palette_render_covers_actions_and_selected_command() {
+        let mut model = test_model();
+        model.command_palette_open = true;
+        model.selected_command_index = 1;
+
+        let output = render_tui_to_text(&model, 120, 34);
+
+        assert!(output.contains("Command Palette"));
+        assert!(output.contains("> Apply sync"));
+        assert!(output.contains("Dry-run sync"));
+        assert!(output.contains("Export report"));
+        assert!(output.contains("enter run"));
+        assert!(output.contains("esc close"));
+    }
+
+    fn test_model() -> AppModel {
+        AppModel {
+            status: AppStatus::Idle,
+            view: AppView::Dashboard,
+            command_palette_open: false,
+            selected_command_index: 0,
+            selected_pair_id: None,
+            selected_run_id: None,
+            run_filter: AppRunFilter::All,
+            conflict_count: 0,
+            last_message: None,
+            last_run_at: None,
+            last_run_status: None,
+            next_run_at: None,
+            recent_error: None,
+            pairs: Vec::new(),
+            runs: Vec::new(),
+        }
+    }
+
+    fn render_tui_to_text(model: &AppModel, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw_tui(frame, model)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        buffer
+            .content()
+            .chunks(usize::from(buffer.area().width))
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
