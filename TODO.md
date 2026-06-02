@@ -47,14 +47,14 @@ future interchangeable taskbar/menu-bar interface.
 - [x] Port the full SQLite schema into `insync-db`.
 - [x] Add typed repository shape for configured calendars/pairs, event links,
       sync state, and conflicts.
-- [ ] Add repository modules:
+- [x] Add repository modules:
       `calendars` and any remaining support tables.
 - [x] Add typed repository modules for event links, sync state, sync runs, and
       conflicts.
 - [x] Add in-memory SQLite tests for the current repositories.
 - [x] Add migration tests from empty DB to latest schema.
-- [ ] Add backup/export/import helpers for user support and debugging.
-- [ ] Keep raw SQL visible and boring; avoid Diesel unless repository code
+- [x] Add backup/export/import helpers for user support and debugging.
+- [x] Keep raw SQL visible and boring; avoid Diesel unless repository code
       becomes a real maintenance problem.
 
 ## 4. Config And Secrets

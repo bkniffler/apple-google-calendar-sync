@@ -19,6 +19,7 @@ async-trait.workspace = true
 insync-core = { path = "../insync-core" }
 insync-app = { path = "../insync-app" }
 insync-config = { path = "../insync-config" }
+insync-db = { path = "../insync-db" }
 insync-engine = { path = "../insync-engine" }
 insync-providers = { path = "../insync-providers" }
 ratatui.workspace = true

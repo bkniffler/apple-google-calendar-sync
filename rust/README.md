@@ -193,6 +193,20 @@ insync background print --template systemd --apply
 Windows background service support is not implemented yet. For now, use Windows
 Task Scheduler to run `insync daemon --apply` after installing the binary.
 
+## Database Maintenance
+
+```bash
+insync db calendars
+insync db backup .insync/backups/insync.db
+insync db export .insync/backups/insync-support.json
+insync db import .insync/backups/insync-support.json --to .insync/restored.db
+```
+
+`db backup` creates a compact SQLite copy using `VACUUM INTO`. `db export`
+writes a JSON dump of the known support tables for inspection or support
+handoff, and `db import` rebuilds a migrated SQLite database from that dump.
+Commands refuse to overwrite existing files unless `--force` is passed.
+
 ## Conflict Maintenance
 
 ```bash

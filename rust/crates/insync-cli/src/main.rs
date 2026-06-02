@@ -16,6 +16,10 @@ use insync_config::{
     load_config, resolve_config_path, save_config, validate_config,
 };
 use insync_core::{CanonicalEvent, ProviderEventMeta, ProviderName, SyncDirection};
+use insync_db::{
+    backup_database, export_database_json, import_database_json, migrate, open,
+    repositories::{calendars::list_calendars, configured_pairs::seed_configured_pairs},
+};
 use insync_engine::{
     ConflictFilter, DoctorSummary, ReportMode, RunMode, SyncEngine, SyncProviders,
     UnresolvedConflictRow, UnresolvedConflictSummary,
@@ -116,6 +120,11 @@ enum Command {
     },
     #[command(about = "Validate config, credentials, database, and latest sync state")]
     Doctor,
+    #[command(about = "Inspect, backup, export, or import the SQLite sync database")]
+    Db {
+        #[command(subcommand)]
+        command: DbCommand,
+    },
     #[command(about = "Inspect, export, dedupe, or retire recorded manual conflicts")]
     Conflicts {
         #[arg(long, help = "Show individual conflict rows instead of pair summaries")]
@@ -184,6 +193,39 @@ enum BackgroundCommand {
         template: BackgroundTemplate,
         #[arg(long, help = "Render daemon arguments with --apply")]
         apply: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DbCommand {
+    #[command(about = "List cached provider calendars from SQLite")]
+    Calendars,
+    #[command(about = "Create a compact SQLite backup with VACUUM INTO")]
+    Backup {
+        #[arg(value_name = "PATH")]
+        output: PathBuf,
+        #[arg(long, help = "Replace an existing output file")]
+        force: bool,
+    },
+    #[command(about = "Write a JSON support export of known SQLite tables")]
+    Export {
+        #[arg(value_name = "PATH")]
+        output: PathBuf,
+        #[arg(long, help = "Replace an existing output file")]
+        force: bool,
+    },
+    #[command(about = "Import a JSON support export into a SQLite database")]
+    Import {
+        #[arg(value_name = "PATH")]
+        input: PathBuf,
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Destination DB path; defaults to configured DB"
+        )]
+        to: Option<PathBuf>,
+        #[arg(long, help = "Replace an existing destination database")]
+        force: bool,
     },
 }
 
@@ -369,6 +411,10 @@ async fn main() -> Result<()> {
             } else {
                 println!("latest run: none");
             }
+        }
+        Command::Db { command } => {
+            let (config_path, config) = load_validated_config(config)?;
+            run_db_command(&config_path, config, command)?;
         }
         Command::Conflicts {
             details,
@@ -599,6 +645,87 @@ fn load_validated_config(
     validate_config(&config)
         .wrap_err_with(|| format!("validating config {}", config_path.display()))?;
     Ok((config_path, config))
+}
+
+fn run_db_command(
+    config_path: &Path,
+    config: insync_config::ServiceConfig,
+    command: DbCommand,
+) -> Result<()> {
+    let db_path = SyncEngine::with_config_path(config.clone(), config_path).db_path();
+
+    match command {
+        DbCommand::Calendars => {
+            let conn = open(&db_path)?;
+            migrate(&conn)?;
+            seed_configured_pairs(&conn, &config)?;
+            let calendars = list_calendars(&conn)?;
+            println!("db: {}", db_path.display());
+            if calendars.is_empty() {
+                println!("cached calendars: none");
+                return Ok(());
+            }
+            println!("cached calendars: {}", calendars.len());
+            for calendar in calendars {
+                println!(
+                    "{}\t{}\t{}\t{}\t{}\t{}",
+                    calendar.provider,
+                    calendar.account_email,
+                    if calendar.writable {
+                        "writable"
+                    } else {
+                        "read-only"
+                    },
+                    calendar.name.as_deref().unwrap_or("-"),
+                    calendar.timezone.as_deref().unwrap_or("-"),
+                    calendar.provider_calendar_id
+                );
+            }
+        }
+        DbCommand::Backup { output, force } => {
+            prepare_output_path(&output, force)?;
+            backup_database(&db_path, &output)?;
+            println!("backed up {} to {}", db_path.display(), output.display());
+        }
+        DbCommand::Export { output, force } => {
+            prepare_output_path(&output, force)?;
+            let export = export_database_json(&db_path, &output)?;
+            let row_count = export
+                .tables
+                .values()
+                .map(std::vec::Vec::len)
+                .sum::<usize>();
+            println!(
+                "exported {} table(s), {} row(s) from {} to {}",
+                export.tables.len(),
+                row_count,
+                db_path.display(),
+                output.display()
+            );
+        }
+        DbCommand::Import { input, to, force } => {
+            let destination = to.unwrap_or(db_path);
+            prepare_output_path(&destination, force)?;
+            import_database_json(&input, &destination)?;
+            println!("imported {} to {}", input.display(), destination.display());
+        }
+    }
+
+    Ok(())
+}
+
+fn prepare_output_path(path: &Path, force: bool) -> Result<()> {
+    if path.exists() {
+        if !force {
+            bail!(
+                "{} already exists; rerun with --force to replace it",
+                path.display()
+            );
+        }
+        fs::remove_file(path).wrap_err_with(|| format!("removing {}", path.display()))?;
+    }
+
+    Ok(())
 }
 
 const BACKGROUND_LABEL: &str = "dev.bkniffler.insync";

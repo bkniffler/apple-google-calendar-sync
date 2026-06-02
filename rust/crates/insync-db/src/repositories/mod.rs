@@ -1,3 +1,4 @@
+pub mod calendars;
 pub mod configured_pairs;
 pub mod event_links;
 pub mod sync_conflicts;
