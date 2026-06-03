@@ -634,6 +634,85 @@ mod tests {
     }
 
     #[test]
+    fn canonical_to_google_insert_payload_omits_null_output_only_fields() {
+        let event = CanonicalEvent {
+            canonical_uid: "uid-2".to_string(),
+            title: "Standup".to_string(),
+            description: None,
+            location: None,
+            status: EventStatus::Confirmed,
+            visibility: EventVisibility::Default,
+            start: EventDateTime::DateTime {
+                value: Utc.with_ymd_and_hms(2026, 6, 1, 13, 0, 0).unwrap(),
+                timezone: None,
+            },
+            end: EventDateTime::DateTime {
+                value: Utc.with_ymd_and_hms(2026, 6, 1, 14, 0, 0).unwrap(),
+                timezone: None,
+            },
+            recurrence: None,
+            attendees: vec![],
+            reminders: vec![],
+            provider_meta: ProviderEventMeta {
+                provider: ProviderName::Icloud,
+                calendar_id: "icloud-cal".to_string(),
+                event_id: None,
+                href: None,
+                etag: None,
+                ical_uid: None,
+                updated_at: None,
+                deleted: false,
+            },
+            raw: serde_json::json!({}),
+        };
+
+        let google = canonical_to_google(&event, ProviderName::Icloud);
+        let payload = serde_json::to_value(&google).unwrap();
+        let object = payload.as_object().unwrap();
+
+        // Output-only / server-managed fields must never be sent on insert.
+        for field in [
+            "id",
+            "etag",
+            "htmlLink",
+            "created",
+            "updated",
+            "colorId",
+            "creator",
+            "organizer",
+            "recurringEventId",
+            "originalStartTime",
+            "iCalUID",
+            "sequence",
+            "recurrence",
+        ] {
+            assert!(
+                !object.contains_key(field),
+                "insert payload should omit {field}, got {payload}"
+            );
+        }
+
+        // No serialized value anywhere in the payload should be JSON null.
+        assert!(
+            !payload_contains_null(&payload),
+            "insert payload should not contain any null values, got {payload}"
+        );
+
+        // The start/end objects should not carry a null timeZone.
+        let start = object.get("start").unwrap().as_object().unwrap();
+        assert!(!start.contains_key("timeZone"), "got {payload}");
+    }
+
+    fn payload_contains_null(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Null => true,
+            serde_json::Value::Array(items) => items.iter().any(payload_contains_null),
+            serde_json::Value::Object(map) => map.values().any(payload_contains_null),
+            _ => false,
+        }
+    }
+
+    #[test]
     fn google_calendar_entry_maps_to_provider_calendar() {
         let calendar = google_calendar_to_provider(GoogleCalendarListEntry {
             id: "primary".to_string(),
