@@ -1499,6 +1499,30 @@ mod tests {
     }
 
     #[test]
+    fn tui_apply_confirm_modal_renders_change_count_and_keys() {
+        let mut model = test_model();
+        model.confirm_apply = true;
+        model.plan = Some(AppPlanSummary {
+            mode: "dry-run".to_string(),
+            total_actions: 4,
+            action_counts: std::collections::BTreeMap::new(),
+            pair_counts: std::collections::BTreeMap::from([
+                ("personal".to_string(), 3),
+                ("work".to_string(), 1),
+            ]),
+            generated_at: now_timestamp(),
+        });
+
+        let output = render_tui_to_text(&model, 120, 34);
+
+        assert!(output.contains("Confirm apply"));
+        assert!(output.contains("Apply sync to live calendars?"));
+        assert!(output.contains("write 4 change(s) across 2 pair(s)"));
+        assert!(output.contains("apply now"));
+        assert!(output.contains("cancel"));
+    }
+
+    #[test]
     fn tui_plan_screen_shows_empty_prompt_without_plan() {
         let mut model = test_model();
         model.view = AppView::Reports;
@@ -1690,6 +1714,7 @@ mod tests {
             status: AppStatus::Idle,
             view: AppView::Dashboard,
             command_palette_open: false,
+            confirm_apply: false,
             selected_command_index: 0,
             selected_pair_id: None,
             selected_run_id: None,
@@ -2927,7 +2952,20 @@ async fn run_tui(mut model: AppModel, runtime: TuiRuntime) -> Result<()> {
         if event::poll(Duration::from_millis(200))?
             && let Event::Key(key) = event::read()?
         {
-            if model.command_palette_open {
+            if model.confirm_apply {
+                match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('a') | KeyCode::Enter => {
+                        let effects = model.update(AppEvent::ConfirmApplyRun);
+                        if apply_tui_effects(&mut terminal, &mut model, &runtime, effects).await {
+                            break Ok(());
+                        }
+                    }
+                    KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('q') => {
+                        model.update(AppEvent::CancelApplyRun);
+                    }
+                    _ => {}
+                }
+            } else if model.command_palette_open {
                 match key.code {
                     KeyCode::Esc => {
                         model.update(AppEvent::CloseCommandPalette);
@@ -2940,7 +2978,7 @@ async fn run_tui(mut model: AppModel, runtime: TuiRuntime) -> Result<()> {
                     }
                     KeyCode::Enter => {
                         let effects = model.update(AppEvent::ExecuteSelectedCommand);
-                        if apply_tui_effects(&mut model, &runtime, effects).await {
+                        if apply_tui_effects(&mut terminal, &mut model, &runtime, effects).await {
                             break Ok(());
                         }
                     }
@@ -2981,13 +3019,13 @@ async fn run_tui(mut model: AppModel, runtime: TuiRuntime) -> Result<()> {
                     }
                     KeyCode::Tab => {
                         model.update(show_view_event(cycle_view(model.view, 1)));
-                        if maybe_autorun_plan(&mut model, &runtime).await {
+                        if maybe_autorun_plan(&mut terminal, &mut model, &runtime).await {
                             break Ok(());
                         }
                     }
                     KeyCode::BackTab => {
                         model.update(show_view_event(cycle_view(model.view, -1)));
-                        if maybe_autorun_plan(&mut model, &runtime).await {
+                        if maybe_autorun_plan(&mut terminal, &mut model, &runtime).await {
                             break Ok(());
                         }
                     }
@@ -2996,7 +3034,7 @@ async fn run_tui(mut model: AppModel, runtime: TuiRuntime) -> Result<()> {
                     }
                     KeyCode::Char('v') => {
                         model.update(AppEvent::ShowReports);
-                        if maybe_autorun_plan(&mut model, &runtime).await {
+                        if maybe_autorun_plan(&mut terminal, &mut model, &runtime).await {
                             break Ok(());
                         }
                     }
@@ -3014,33 +3052,33 @@ async fn run_tui(mut model: AppModel, runtime: TuiRuntime) -> Result<()> {
                     }
                     KeyCode::Char('d') => {
                         let effects = model.update(AppEvent::ExecuteCommand(AppCommand::DryRun));
-                        if apply_tui_effects(&mut model, &runtime, effects).await {
+                        if apply_tui_effects(&mut terminal, &mut model, &runtime, effects).await {
                             break Ok(());
                         }
                     }
                     KeyCode::Char('a') => {
                         let effects = model.update(AppEvent::ExecuteCommand(AppCommand::ApplyRun));
-                        if apply_tui_effects(&mut model, &runtime, effects).await {
+                        if apply_tui_effects(&mut terminal, &mut model, &runtime, effects).await {
                             break Ok(());
                         }
                     }
                     KeyCode::Char('r') => {
                         let effects =
                             model.update(AppEvent::ExecuteCommand(AppCommand::RefreshConflicts));
-                        if apply_tui_effects(&mut model, &runtime, effects).await {
+                        if apply_tui_effects(&mut terminal, &mut model, &runtime, effects).await {
                             break Ok(());
                         }
                     }
                     KeyCode::Char('s') => {
                         let effects = model.update(AppEvent::ExecuteCommand(AppCommand::OpenSetup));
-                        if apply_tui_effects(&mut model, &runtime, effects).await {
+                        if apply_tui_effects(&mut terminal, &mut model, &runtime, effects).await {
                             break Ok(());
                         }
                     }
                     KeyCode::Char('b') => {
                         let effects = model
                             .update(AppEvent::ExecuteCommand(AppCommand::ToggleBackgroundPause));
-                        if apply_tui_effects(&mut model, &runtime, effects).await {
+                        if apply_tui_effects(&mut terminal, &mut model, &runtime, effects).await {
                             break Ok(());
                         }
                     }
@@ -3061,11 +3099,17 @@ async fn run_tui(mut model: AppModel, runtime: TuiRuntime) -> Result<()> {
     result
 }
 
-async fn apply_tui_effects(
+async fn apply_tui_effects<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
     model: &mut AppModel,
     runtime: &TuiRuntime,
     effects: Vec<AppEffect>,
 ) -> bool {
+    // Paint the "Syncing" state before the (blocking) engine call so the user
+    // sees progress instead of a frozen previous frame.
+    if model.status == AppStatus::Syncing {
+        let _ = terminal.draw(|frame| draw_tui(frame, model));
+    }
     for effect in effects {
         let result = match effect {
             AppEffect::RunDrySync => run_tui_sync(model, runtime, RunMode::DryRun).await,
@@ -3114,7 +3158,11 @@ async fn apply_tui_effects(
 /// When the user lands on the Plan screen with nothing planned yet, kick off a
 /// dry-run automatically so the screen shows real data instead of an empty
 /// prompt. Returns whether the app should quit (it never does here).
-async fn maybe_autorun_plan(model: &mut AppModel, runtime: &TuiRuntime) -> bool {
+async fn maybe_autorun_plan<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+    model: &mut AppModel,
+    runtime: &TuiRuntime,
+) -> bool {
     if model.view == AppView::Reports
         && model.plan.is_none()
         && model.report_rows.is_empty()
@@ -3122,7 +3170,7 @@ async fn maybe_autorun_plan(model: &mut AppModel, runtime: &TuiRuntime) -> bool 
         && model.enabled_pair_count() > 0
     {
         let effects = model.update(AppEvent::StartDryRun);
-        return apply_tui_effects(model, runtime, effects).await;
+        return apply_tui_effects(terminal, model, runtime, effects).await;
     }
     false
 }
@@ -3274,6 +3322,74 @@ fn draw_tui(frame: &mut Frame<'_>, model: &AppModel) {
     if model.command_palette_open {
         render_command_palette(frame, area, model);
     }
+
+    if model.confirm_apply {
+        render_apply_confirm(frame, area, model);
+    }
+}
+
+fn render_apply_confirm(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+    let area = centered_rect(62, 40, area);
+    frame.render_widget(Clear, area);
+
+    let action_line = match &model.plan {
+        Some(plan) if plan.total_actions > 0 => format!(
+            "This will write {} change(s) across {} pair(s) to your live calendars.",
+            plan.total_actions,
+            plan.pair_counts.len()
+        ),
+        Some(_) => {
+            "The last dry-run found no changes, but apply will re-plan and write.".to_string()
+        }
+        None => {
+            "No dry-run has been previewed yet — apply will plan and write in one step.".to_string()
+        }
+    };
+
+    let lines = vec![
+        Line::from(Span::styled(
+            "Apply sync to live calendars?",
+            Style::default()
+                .fg(color_danger())
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(String::new()),
+        Line::from(Span::styled(
+            action_line,
+            Style::default().fg(color_neutral()),
+        )),
+        Line::from(String::new()),
+        Line::from(vec![
+            Span::styled(
+                "y/enter",
+                Style::default()
+                    .fg(color_danger())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" apply now    "),
+            Span::styled(
+                "n/esc",
+                Style::default()
+                    .fg(color_checking())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" cancel"),
+        ]),
+    ];
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(" Confirm apply ")
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(color_danger())),
+            )
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        area,
+    );
 }
 
 fn render_dashboard(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {

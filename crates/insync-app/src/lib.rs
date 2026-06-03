@@ -9,6 +9,7 @@ pub struct AppModel {
     pub status: AppStatus,
     pub view: AppView,
     pub command_palette_open: bool,
+    pub confirm_apply: bool,
     pub selected_command_index: usize,
     pub selected_pair_id: Option<String>,
     pub selected_run_id: Option<String>,
@@ -285,6 +286,9 @@ pub enum AppStatus {
 pub enum AppEvent {
     StartDryRun,
     StartApplyRun,
+    RequestApplyRun,
+    ConfirmApplyRun,
+    CancelApplyRun,
     StartDaemon,
     StopDaemon,
     OpenSetup,
@@ -333,6 +337,7 @@ impl AppModel {
             status: AppStatus::Idle,
             view: AppView::Dashboard,
             command_palette_open: false,
+            confirm_apply: false,
             selected_command_index: 0,
             selected_pair_id: config.sync.pairs.first().map(|pair| pair.id.clone()),
             selected_run_id: None,
@@ -543,6 +548,18 @@ impl AppModel {
             AppEvent::StartApplyRun => {
                 self.status = AppStatus::Syncing;
                 vec![AppEffect::RunApplySync]
+            }
+            AppEvent::RequestApplyRun => {
+                self.confirm_apply = true;
+                Vec::new()
+            }
+            AppEvent::ConfirmApplyRun => {
+                self.confirm_apply = false;
+                self.update(AppEvent::StartApplyRun)
+            }
+            AppEvent::CancelApplyRun => {
+                self.confirm_apply = false;
+                Vec::new()
             }
             AppEvent::StartDaemon => {
                 self.status = AppStatus::Syncing;
@@ -772,7 +789,7 @@ impl AppModel {
         }
         match command {
             AppCommand::DryRun => self.update(AppEvent::StartDryRun),
-            AppCommand::ApplyRun => self.update(AppEvent::StartApplyRun),
+            AppCommand::ApplyRun => self.update(AppEvent::RequestApplyRun),
             AppCommand::RefreshConflicts => self.update(AppEvent::RefreshConflicts),
             AppCommand::ShowConflicts => self.update(AppEvent::ShowConflicts),
             AppCommand::OpenSetup => self.update(AppEvent::ShowSetup),
@@ -1220,6 +1237,7 @@ mod tests {
             status: AppStatus::Idle,
             view: AppView::Dashboard,
             command_palette_open: false,
+            confirm_apply: false,
             selected_command_index: 0,
             selected_pair_id: None,
             selected_run_id: None,
@@ -1256,6 +1274,7 @@ mod tests {
             status: AppStatus::Idle,
             view: AppView::Dashboard,
             command_palette_open: false,
+            confirm_apply: false,
             selected_command_index: 0,
             selected_pair_id: Some("a".to_string()),
             selected_run_id: None,
@@ -1319,6 +1338,7 @@ mod tests {
             status: AppStatus::Idle,
             view: AppView::Dashboard,
             command_palette_open: false,
+            confirm_apply: false,
             selected_command_index: 0,
             selected_pair_id: None,
             selected_run_id: None,
@@ -1369,6 +1389,7 @@ mod tests {
             status: AppStatus::Idle,
             view: AppView::Dashboard,
             command_palette_open: false,
+            confirm_apply: false,
             selected_command_index: 0,
             selected_pair_id: Some("a".to_string()),
             selected_run_id: None,
@@ -1437,6 +1458,7 @@ mod tests {
             status: AppStatus::Idle,
             view: AppView::Dashboard,
             command_palette_open: false,
+            confirm_apply: false,
             selected_command_index: 0,
             selected_pair_id: None,
             selected_run_id: None,
@@ -1589,6 +1611,7 @@ mod tests {
             status: AppStatus::Idle,
             view: AppView::Dashboard,
             command_palette_open: false,
+            confirm_apply: false,
             selected_command_index: 0,
             selected_pair_id: None,
             selected_run_id: None,
@@ -1693,6 +1716,7 @@ mod tests {
             status: AppStatus::Idle,
             view: AppView::Dashboard,
             command_palette_open: false,
+            confirm_apply: false,
             selected_command_index: 0,
             selected_pair_id: None,
             selected_run_id: None,
@@ -1781,6 +1805,7 @@ mod tests {
             status: AppStatus::Idle,
             view: AppView::Dashboard,
             command_palette_open: false,
+            confirm_apply: false,
             selected_command_index: 0,
             selected_pair_id: None,
             selected_run_id: None,
@@ -1861,6 +1886,34 @@ mod tests {
         let effects = model.update(AppEvent::ExecuteCommand(AppCommand::OpenSetup));
         assert_eq!(effects, Vec::<AppEffect>::new());
         assert_eq!(model.view, AppView::Setup);
+    }
+
+    #[test]
+    fn apply_command_opens_confirmation_then_runs() {
+        let mut config = ServiceConfig::default();
+        config.sync.pairs = vec![insync_config::SyncPairConfig {
+            id: "personal".to_string(),
+            enabled: true,
+            direction: SyncDirection::TwoWay,
+            google_calendar_id: "primary".to_string(),
+            icloud_calendar_id: "https://caldav.example/cal".to_string(),
+        }];
+        let mut model = AppModel::from_config(&config);
+
+        let effects = model.update(AppEvent::ExecuteCommand(AppCommand::ApplyRun));
+        assert!(effects.is_empty());
+        assert!(model.confirm_apply);
+        assert_eq!(model.status, AppStatus::Idle);
+
+        model.update(AppEvent::CancelApplyRun);
+        assert!(!model.confirm_apply);
+        assert_eq!(model.status, AppStatus::Idle);
+
+        model.update(AppEvent::ExecuteCommand(AppCommand::ApplyRun));
+        let effects = model.update(AppEvent::ConfirmApplyRun);
+        assert!(!model.confirm_apply);
+        assert_eq!(model.status, AppStatus::Syncing);
+        assert_eq!(effects, vec![AppEffect::RunApplySync]);
     }
 
     #[test]
