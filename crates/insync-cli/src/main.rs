@@ -3131,10 +3131,6 @@ async fn run_tui(mut model: AppModel, runtime: TuiRuntime) -> Result<()> {
                 }
             }
         }
-
-        if model.status == AppStatus::Error {
-            break Ok(());
-        }
     };
 
     disable_raw_mode()?;

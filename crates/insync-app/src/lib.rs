@@ -709,6 +709,7 @@ impl AppModel {
             }
             AppEvent::EngineFailed { message } => {
                 self.status = AppStatus::Error;
+                self.recent_error = Some(message.clone());
                 self.last_message = Some(message);
                 Vec::new()
             }
