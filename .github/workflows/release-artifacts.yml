@@ -73,11 +73,80 @@ jobs:
           Copy-Item "target/release/insync-tray${{ matrix.exe }}" dist/
           Compress-Archive -Path dist/* -DestinationPath "insync-${{ matrix.label }}.zip"
 
+      # Bundle the tray as a proper menu-bar .app (LSUIElement, no Dock icon)
+      # and ship it in a drag-to-install .dmg. Both binaries live in
+      # Contents/MacOS so the tray finds the `insync` CLI as a sibling.
+      - name: Package macOS .app + .dmg
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          case "$VERSION" in v*|"" | *[!0-9.]*) VERSION="0.0.0" ;; esac
+
+          # PNG -> .icns
+          mkdir -p icon.iconset
+          SRC=crates/insync-tray/assets/icon.png
+          sips -z 16 16     "$SRC" --out icon.iconset/icon_16x16.png
+          sips -z 32 32     "$SRC" --out icon.iconset/icon_16x16@2x.png
+          sips -z 32 32     "$SRC" --out icon.iconset/icon_32x32.png
+          sips -z 64 64     "$SRC" --out icon.iconset/icon_32x32@2x.png
+          sips -z 128 128   "$SRC" --out icon.iconset/icon_128x128.png
+          sips -z 256 256   "$SRC" --out icon.iconset/icon_128x128@2x.png
+          sips -z 256 256   "$SRC" --out icon.iconset/icon_256x256.png
+          sips -z 512 512   "$SRC" --out icon.iconset/icon_256x256@2x.png
+          sips -z 512 512   "$SRC" --out icon.iconset/icon_512x512.png
+          cp "$SRC"         icon.iconset/icon_512x512@2x.png
+          iconutil -c icns icon.iconset -o insync.icns
+
+          APP="insync.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp target/release/insync target/release/insync-tray "$APP/Contents/MacOS/"
+          cp insync.icns "$APP/Contents/Resources/"
+          printf '%s\n' \
+            '<?xml version="1.0" encoding="UTF-8"?>' \
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+            '<plist version="1.0">' \
+            '<dict>' \
+            '  <key>CFBundleName</key><string>insync</string>' \
+            '  <key>CFBundleDisplayName</key><string>insync</string>' \
+            '  <key>CFBundleIdentifier</key><string>com.bkniffler.insync</string>' \
+            "  <key>CFBundleVersion</key><string>${VERSION}</string>" \
+            "  <key>CFBundleShortVersionString</key><string>${VERSION}</string>" \
+            '  <key>CFBundleExecutable</key><string>insync-tray</string>' \
+            '  <key>CFBundleIconFile</key><string>insync.icns</string>' \
+            '  <key>CFBundlePackageType</key><string>APPL</string>' \
+            '  <key>LSMinimumSystemVersion</key><string>11.0</string>' \
+            '  <key>LSUIElement</key><true/>' \
+            '  <key>NSHighResolutionCapable</key><true/>' \
+            '</dict>' \
+            '</plist>' \
+            > "$APP/Contents/Info.plist"
+
+          # Ad-hoc sign so the bundle runs on Apple Silicon after the user
+          # clears quarantine (not notarized — Gatekeeper still warns once).
+          codesign --force --deep --sign - "$APP"
+
+          # Build the drag-to-install disk image.
+          mkdir -p dmgroot
+          cp -R "$APP" dmgroot/
+          ln -s /Applications dmgroot/Applications
+          hdiutil create -volname "insync" -srcfolder dmgroot -ov -format UDZO \
+            "insync-${{ matrix.label }}.dmg"
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: insync-${{ matrix.label }}
           path: insync-${{ matrix.label }}.${{ matrix.archive }}
+          if-no-files-found: error
+
+      - name: Upload macOS .dmg
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: insync-${{ matrix.label }}-dmg
+          path: insync-${{ matrix.label }}.dmg
           if-no-files-found: error
 
   release:

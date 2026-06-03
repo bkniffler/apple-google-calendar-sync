@@ -1585,7 +1585,7 @@ dependencies = [
 
 [[package]]
 name = "insync-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1682,7 +1682,7 @@ dependencies = [
 
 [[package]]
 name = "insync-tray"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "color-eyre",
