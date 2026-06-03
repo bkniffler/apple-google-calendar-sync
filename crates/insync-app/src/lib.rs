@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use insync_config::{SecretStoreKind, ServiceConfig};
 use insync_core::SyncDirection;
 use serde::{Deserialize, Serialize};
@@ -26,6 +28,7 @@ pub struct AppModel {
     pub pairs: Vec<AppPair>,
     pub runs: Vec<AppRun>,
     pub report_rows: Vec<AppReportRow>,
+    pub plan: Option<AppPlanSummary>,
     pub conflict_summaries: Vec<AppConflictSummary>,
     pub conflict_details: Vec<AppConflictDetail>,
 }
@@ -87,6 +90,7 @@ pub struct AppRuntimeSnapshot {
     pub pairs: Vec<AppPairRuntimeSnapshot>,
     pub runs: Vec<AppRun>,
     pub report_rows: Vec<AppReportRow>,
+    pub plan: Option<AppPlanSummary>,
     pub conflict_summaries: Vec<AppConflictSummary>,
     pub conflict_details: Vec<AppConflictDetail>,
 }
@@ -160,9 +164,29 @@ pub struct AppReportRow {
     pub reason: String,
     pub resolution: String,
     pub title: String,
+    pub canonical_uid: String,
     pub google_present: String,
     pub icloud_present: String,
+    pub google_title: String,
+    pub icloud_title: String,
+    pub google_start: String,
+    pub icloud_start: String,
+    pub google_end: String,
+    pub icloud_end: String,
+    pub google_status: String,
+    pub icloud_status: String,
     pub diff_fields: String,
+}
+
+/// Aggregate snapshot of the most recent dry-run/apply plan, surfaced as the
+/// summary band on the Plan screen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppPlanSummary {
+    pub mode: String,
+    pub total_actions: usize,
+    pub action_counts: BTreeMap<String, usize>,
+    pub pair_counts: BTreeMap<String, usize>,
+    pub generated_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -345,6 +369,7 @@ impl AppModel {
                 .collect(),
             runs: Vec::new(),
             report_rows: Vec::new(),
+            plan: None,
             conflict_summaries: Vec::new(),
             conflict_details: Vec::new(),
         }
@@ -470,6 +495,7 @@ impl AppModel {
         self.runs = snapshot.runs;
         self.ensure_selected_run();
         self.report_rows = snapshot.report_rows;
+        self.plan = snapshot.plan;
         self.ensure_selected_report_row();
         self.conflict_summaries = snapshot.conflict_summaries;
         self.conflict_details = snapshot.conflict_details;
@@ -1213,6 +1239,7 @@ mod tests {
             pairs: Vec::new(),
             runs: Vec::new(),
             report_rows: Vec::new(),
+            plan: None,
             conflict_summaries: Vec::new(),
             conflict_details: Vec::new(),
         };
@@ -1275,6 +1302,7 @@ mod tests {
             ],
             runs: Vec::new(),
             report_rows: Vec::new(),
+            plan: None,
             conflict_summaries: Vec::new(),
             conflict_details: Vec::new(),
         };
@@ -1310,6 +1338,7 @@ mod tests {
             pairs: Vec::new(),
             runs: Vec::new(),
             report_rows: Vec::new(),
+            plan: None,
             conflict_summaries: Vec::new(),
             conflict_details: Vec::new(),
         };
@@ -1323,6 +1352,7 @@ mod tests {
             pairs: Vec::new(),
             runs: Vec::new(),
             report_rows: Vec::new(),
+            plan: None,
             conflict_summaries: Vec::new(),
             conflict_details: Vec::new(),
         });
@@ -1370,6 +1400,7 @@ mod tests {
             }],
             runs: Vec::new(),
             report_rows: Vec::new(),
+            plan: None,
             conflict_summaries: Vec::new(),
             conflict_details: Vec::new(),
         };
@@ -1386,6 +1417,7 @@ mod tests {
             }],
             runs: Vec::new(),
             report_rows: Vec::new(),
+            plan: None,
             conflict_summaries: Vec::new(),
             conflict_details: Vec::new(),
             ..AppRuntimeSnapshot::default()
@@ -1424,6 +1456,7 @@ mod tests {
             pairs: Vec::new(),
             runs: Vec::new(),
             report_rows: Vec::new(),
+            plan: None,
             conflict_summaries: Vec::new(),
             conflict_details: Vec::new(),
         };
@@ -1476,8 +1509,17 @@ mod tests {
                     reason: "google_changed".to_string(),
                     resolution: "apply".to_string(),
                     title: "Budget review".to_string(),
+                    canonical_uid: "uid-work".to_string(),
                     google_present: "yes".to_string(),
                     icloud_present: "yes".to_string(),
+                    google_title: "Budget review".to_string(),
+                    icloud_title: "Budget review".to_string(),
+                    google_start: String::new(),
+                    icloud_start: String::new(),
+                    google_end: String::new(),
+                    icloud_end: String::new(),
+                    google_status: String::new(),
+                    icloud_status: String::new(),
                     diff_fields: "title,start".to_string(),
                 },
                 AppReportRow {
@@ -1486,8 +1528,17 @@ mod tests {
                     reason: "missing_icloud".to_string(),
                     resolution: "apply".to_string(),
                     title: "Dentist".to_string(),
+                    canonical_uid: "uid-dentist".to_string(),
                     google_present: "yes".to_string(),
                     icloud_present: "no".to_string(),
+                    google_title: "Dentist".to_string(),
+                    icloud_title: String::new(),
+                    google_start: String::new(),
+                    icloud_start: String::new(),
+                    google_end: String::new(),
+                    icloud_end: String::new(),
+                    google_status: String::new(),
+                    icloud_status: String::new(),
                     diff_fields: String::new(),
                 },
                 AppReportRow {
@@ -1496,8 +1547,17 @@ mod tests {
                     reason: "both_sides_changed".to_string(),
                     resolution: "manual".to_string(),
                     title: "Planning".to_string(),
+                    canonical_uid: "uid-planning".to_string(),
                     google_present: "yes".to_string(),
                     icloud_present: "yes".to_string(),
+                    google_title: "Planning".to_string(),
+                    icloud_title: "Planning".to_string(),
+                    google_start: String::new(),
+                    icloud_start: String::new(),
+                    google_end: String::new(),
+                    icloud_end: String::new(),
+                    google_status: String::new(),
+                    icloud_status: String::new(),
                     diff_fields: "title".to_string(),
                 },
             ],
@@ -1548,6 +1608,7 @@ mod tests {
             pairs: Vec::new(),
             runs: Vec::new(),
             report_rows: Vec::new(),
+            plan: None,
             conflict_summaries: Vec::new(),
             conflict_details: Vec::new(),
         };
@@ -1651,6 +1712,7 @@ mod tests {
             pairs: Vec::new(),
             runs: Vec::new(),
             report_rows: Vec::new(),
+            plan: None,
             conflict_summaries: Vec::new(),
             conflict_details: Vec::new(),
         };
@@ -1738,6 +1800,7 @@ mod tests {
             pairs: Vec::new(),
             runs: Vec::new(),
             report_rows: Vec::new(),
+            plan: None,
             conflict_summaries: Vec::new(),
             conflict_details: Vec::new(),
         };

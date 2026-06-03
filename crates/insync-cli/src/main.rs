@@ -8,8 +8,8 @@ use crossterm::{
 };
 use insync_app::{
     AppCommand, AppConflictDetail, AppConflictSummary, AppEffect, AppEvent, AppModel,
-    AppNotificationSeverity, AppPairRuntimeSnapshot, AppReportRow, AppRun, AppRuntimeSnapshot,
-    AppSetupStep, AppSetupStepStatus, AppShellAction, AppStatus, AppView,
+    AppNotificationSeverity, AppPairRuntimeSnapshot, AppPlanSummary, AppReportRow, AppRun,
+    AppRuntimeSnapshot, AppSetupStep, AppSetupStepStatus, AppShellAction, AppStatus, AppView,
 };
 #[cfg(test)]
 use insync_app::{AppReportFilter, AppReportSort, AppRunFilter, AppSetupState};
@@ -54,9 +54,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{
-        Block, BorderType, Borders, Clear, Gauge, List, ListItem, Paragraph, Row, Table, Wrap,
-    },
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Row, Table, Wrap},
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -1311,13 +1309,13 @@ mod tests {
         let output = render_tui_to_text(&test_model(), 120, 34);
 
         assert!(output.contains("insync"));
+        assert!(output.contains("Pairs"));
         assert!(output.contains("No calendar pairs configured."));
         assert!(output.contains("Run setup or press s"));
-        assert!(output.contains(": pal"));
+        assert!(output.contains(": cmds"));
         assert!(output.contains("b pause"));
-        assert!(output.contains("No runs yet"));
-        assert!(output.contains("Notifications"));
-        assert!(output.contains("Info No calendar pairs configured"));
+        assert!(output.contains("No sync runs yet."));
+        assert!(output.contains("No calendar pairs configured"));
     }
 
     #[test]
@@ -1415,7 +1413,7 @@ mod tests {
         assert!(output.contains("Run insync setup --discover"));
         assert!(output.contains("Selected Pair"));
         assert!(output.contains("primary"));
-        assert!(output.contains("s set"));
+        assert!(output.contains("r refresh"));
     }
 
     #[test]
@@ -1432,8 +1430,17 @@ mod tests {
                 reason: "google_changed".to_string(),
                 resolution: "apply".to_string(),
                 title: "Budget review".to_string(),
+                canonical_uid: "uid-work".to_string(),
                 google_present: "yes".to_string(),
                 icloud_present: "yes".to_string(),
+                google_title: "Budget review".to_string(),
+                icloud_title: "Budget overview".to_string(),
+                google_start: "2026-06-04T09:00:00Z".to_string(),
+                icloud_start: "2026-06-04T09:30:00Z".to_string(),
+                google_end: "2026-06-04T10:00:00Z".to_string(),
+                icloud_end: "2026-06-04T10:30:00Z".to_string(),
+                google_status: "confirmed".to_string(),
+                icloud_status: "confirmed".to_string(),
                 diff_fields: "title,start".to_string(),
             },
             AppReportRow {
@@ -1442,11 +1449,34 @@ mod tests {
                 reason: "missing_icloud".to_string(),
                 resolution: "apply".to_string(),
                 title: "Dentist".to_string(),
+                canonical_uid: "uid-dentist".to_string(),
                 google_present: "yes".to_string(),
                 icloud_present: "no".to_string(),
+                google_title: "Dentist".to_string(),
+                icloud_title: String::new(),
+                google_start: "2026-06-05T08:00:00Z".to_string(),
+                icloud_start: String::new(),
+                google_end: "2026-06-05T08:45:00Z".to_string(),
+                icloud_end: String::new(),
+                google_status: "confirmed".to_string(),
+                icloud_status: String::new(),
                 diff_fields: String::new(),
             },
         ];
+
+        model.plan = Some(AppPlanSummary {
+            mode: "dry-run".to_string(),
+            total_actions: 3,
+            action_counts: std::collections::BTreeMap::from([
+                ("create_icloud".to_string(), 1),
+                ("update_google".to_string(), 2),
+            ]),
+            pair_counts: std::collections::BTreeMap::from([
+                ("personal".to_string(), 1),
+                ("work".to_string(), 2),
+            ]),
+            generated_at: now_timestamp(),
+        });
 
         let output = render_tui_to_text(&model, 132, 36);
 
@@ -1456,8 +1486,27 @@ mod tests {
         assert!(output.contains("Dentist"));
         assert!(output.contains("Report Detail"));
         assert!(output.contains("Present: Google yes / iCloud no"));
-        assert!(output.contains("v report"));
+        assert!(output.contains("f filter"));
         assert!(output.contains("t sort"));
+        // Plan summary band.
+        assert!(output.contains("dry-run"));
+        assert!(output.contains("3 actions"));
+        assert!(output.contains("2 pairs"));
+        assert!(output.contains("create_icloud 1"));
+        assert!(output.contains("update_google 2"));
+        // Field-level comparison detail for the selected (create) row.
+        assert!(output.contains("UID: uid-dentist"));
+    }
+
+    #[test]
+    fn tui_plan_screen_shows_empty_prompt_without_plan() {
+        let mut model = test_model();
+        model.view = AppView::Reports;
+
+        let output = render_tui_to_text(&model, 132, 36);
+
+        assert!(output.contains("No plan yet"));
+        assert!(output.contains("Press d to run a dry-run"));
     }
 
     #[test]
@@ -1504,7 +1553,7 @@ mod tests {
         assert!(output.contains("Policy: manual review"));
         assert!(output.contains("Audit: unresolved since"));
         assert!(output.contains("uid-1"));
-        assert!(output.contains("c conf"));
+        assert!(output.contains("g/i resolve"));
     }
 
     #[test]
@@ -1615,10 +1664,10 @@ mod tests {
 
         let output = render_tui_to_text(&model, 120, 34);
 
-        assert!(output.contains("Notifications"));
-        assert!(output.contains("Error auth failed while refreshing Google"));
-        assert!(output.contains("Warning 2 unresolved conflict(s)"));
-        assert!(output.contains("Info No calendar pairs configured"));
+        assert!(output.contains("Error"));
+        assert!(output.contains("auth failed while refreshing Google"));
+        assert!(output.contains("(+2 more)"));
+        assert!(output.contains("2 conflict"));
         assert!(output.contains("q quit"));
     }
 
@@ -1633,7 +1682,7 @@ mod tests {
 
         assert!(output.contains("b resume"));
         assert!(output.contains("> Resume background"));
-        assert!(output.contains("Background sync is paused"));
+        assert!(output.contains("paused"));
     }
 
     fn test_model() -> AppModel {
@@ -1660,6 +1709,7 @@ mod tests {
             pairs: Vec::new(),
             runs: Vec::new(),
             report_rows: Vec::new(),
+            plan: None,
             conflict_summaries: Vec::new(),
             conflict_details: Vec::new(),
         }
@@ -2337,6 +2387,7 @@ fn runtime_snapshot_from_doctor(
         pairs: pair_runtime_snapshots(&summary.db_path, config)?,
         runs: run_runtime_snapshots(&summary.db_path)?,
         report_rows: Vec::new(),
+        plan: None,
         conflict_summaries: conflict_summary_snapshots(&summary.db_path)?,
         conflict_details: conflict_detail_snapshots(&summary.db_path)?,
     })
@@ -2928,11 +2979,26 @@ async fn run_tui(mut model: AppModel, runtime: TuiRuntime) -> Result<()> {
                     KeyCode::Esc | KeyCode::Char('p') => {
                         model.update(AppEvent::ShowDashboard);
                     }
+                    KeyCode::Tab => {
+                        model.update(show_view_event(cycle_view(model.view, 1)));
+                        if maybe_autorun_plan(&mut model, &runtime).await {
+                            break Ok(());
+                        }
+                    }
+                    KeyCode::BackTab => {
+                        model.update(show_view_event(cycle_view(model.view, -1)));
+                        if maybe_autorun_plan(&mut model, &runtime).await {
+                            break Ok(());
+                        }
+                    }
                     KeyCode::Char('l') => {
                         model.update(AppEvent::ShowRuns);
                     }
                     KeyCode::Char('v') => {
                         model.update(AppEvent::ShowReports);
+                        if maybe_autorun_plan(&mut model, &runtime).await {
+                            break Ok(());
+                        }
                     }
                     KeyCode::Char('c') => {
                         model.update(AppEvent::ShowConflicts);
@@ -3005,7 +3071,7 @@ async fn apply_tui_effects(
             AppEffect::RunDrySync => run_tui_sync(model, runtime, RunMode::DryRun).await,
             AppEffect::RunApplySync => run_tui_sync(model, runtime, RunMode::Apply).await,
             AppEffect::LoadConflicts => {
-                refresh_tui_runtime_snapshot(model, runtime, None, "conflicts refreshed")
+                refresh_tui_runtime_snapshot(model, runtime, None, None, "conflicts refreshed")
             }
             AppEffect::ShowSetup => {
                 model.update(AppEvent::EngineFinished {
@@ -3045,6 +3111,22 @@ async fn apply_tui_effects(
     false
 }
 
+/// When the user lands on the Plan screen with nothing planned yet, kick off a
+/// dry-run automatically so the screen shows real data instead of an empty
+/// prompt. Returns whether the app should quit (it never does here).
+async fn maybe_autorun_plan(model: &mut AppModel, runtime: &TuiRuntime) -> bool {
+    if model.view == AppView::Reports
+        && model.plan.is_none()
+        && model.report_rows.is_empty()
+        && model.status != AppStatus::Syncing
+        && model.enabled_pair_count() > 0
+    {
+        let effects = model.update(AppEvent::StartDryRun);
+        return apply_tui_effects(model, runtime, effects).await;
+    }
+    false
+}
+
 async fn run_tui_sync(model: &mut AppModel, runtime: &TuiRuntime, mode: RunMode) -> Result<()> {
     let summary = runtime
         .engine
@@ -3062,22 +3144,30 @@ async fn run_tui_sync(model: &mut AppModel, runtime: &TuiRuntime, mode: RunMode)
         .iter()
         .map(app_report_row)
         .collect::<Vec<_>>();
+    let plan = app_plan_summary(&summary);
     let message = tui_sync_message(&summary);
 
-    refresh_tui_runtime_snapshot(model, runtime, Some(report_rows), &message)
+    refresh_tui_runtime_snapshot(model, runtime, Some(report_rows), Some(plan), &message)
 }
 
 fn refresh_tui_runtime_snapshot(
     model: &mut AppModel,
     runtime: &TuiRuntime,
     report_rows: Option<Vec<AppReportRow>>,
+    plan: Option<AppPlanSummary>,
     message: &str,
 ) -> Result<()> {
     let doctor = runtime.engine.doctor()?;
     let mut snapshot = runtime_snapshot_from_doctor(&doctor, &runtime.config)?;
     match report_rows {
-        Some(report_rows) => snapshot.report_rows = report_rows,
-        None => snapshot.report_rows = model.report_rows.clone(),
+        Some(report_rows) => {
+            snapshot.report_rows = report_rows;
+            snapshot.plan = plan;
+        }
+        None => {
+            snapshot.report_rows = model.report_rows.clone();
+            snapshot.plan = model.plan.clone();
+        }
     }
     model.apply_runtime_snapshot(snapshot);
     model.update(AppEvent::EngineFinished {
@@ -3093,9 +3183,37 @@ fn app_report_row(row: &insync_engine::ReportRow) -> AppReportRow {
         reason: row.reason.clone(),
         resolution: row.resolution.clone(),
         title: row.title.clone(),
+        canonical_uid: row.canonical_uid.clone(),
         google_present: row.google_present.clone(),
         icloud_present: row.icloud_present.clone(),
+        google_title: row.google_title.clone(),
+        icloud_title: row.icloud_title.clone(),
+        google_start: row.google_start.clone(),
+        icloud_start: row.icloud_start.clone(),
+        google_end: row.google_end.clone(),
+        icloud_end: row.icloud_end.clone(),
+        google_status: row.google_status.clone(),
+        icloud_status: row.icloud_status.clone(),
         diff_fields: row.diff_fields.clone(),
+    }
+}
+
+fn app_plan_summary(summary: &PlannedSyncSummary) -> AppPlanSummary {
+    let total_actions = summary.action_counts.values().copied().sum();
+    let pair_counts = summary
+        .pair_summaries
+        .iter()
+        .map(|pair| (pair.pair_id.clone(), pair.actions))
+        .collect();
+    AppPlanSummary {
+        mode: match summary.mode {
+            RunMode::DryRun => "dry-run".to_string(),
+            RunMode::Apply => "apply".to_string(),
+        },
+        total_actions,
+        action_counts: summary.action_counts.clone(),
+        pair_counts,
+        generated_at: now_timestamp(),
     }
 }
 
@@ -3120,196 +3238,289 @@ fn tui_sync_message(summary: &PlannedSyncSummary) -> String {
 
 fn draw_tui(frame: &mut Frame<'_>, model: &AppModel) {
     let area = frame.area();
-    let has_notifications = !model.shell_snapshot().notifications.is_empty();
-    let constraints = if has_notifications {
-        vec![
-            Constraint::Length(4),
-            Constraint::Length(7),
-            Constraint::Min(10),
-            Constraint::Length(5),
-            Constraint::Length(4),
-        ]
-    } else {
-        vec![
-            Constraint::Length(4),
-            Constraint::Length(7),
-            Constraint::Min(12),
-            Constraint::Length(4),
-        ]
-    };
+    let alert = top_alert(model);
+    let mut constraints = vec![Constraint::Length(1)];
+    if alert.is_some() {
+        constraints.push(Constraint::Length(1));
+    }
+    constraints.push(Constraint::Min(3));
+    constraints.push(Constraint::Length(1));
+
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
         .split(area);
 
-    render_header(frame, vertical[0], model);
-    render_metrics(frame, vertical[1], model);
+    render_status_bar(frame, vertical[0], model);
+    let body_index = if let Some(alert) = alert {
+        render_alert(frame, vertical[1], &alert);
+        2
+    } else {
+        1
+    };
+    let body = vertical[body_index];
+    let hint = vertical[body_index + 1];
 
     match model.view {
-        AppView::Dashboard => {
-            if area.width < 100 {
-                let body = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(5), Constraint::Min(7)])
-                    .split(vertical[2]);
-                render_pair_table(frame, body[0], model);
-                render_side_panel(frame, body[1], model);
-            } else {
-                let body = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-                    .split(vertical[2]);
-                render_pair_table(frame, body[0], model);
-                render_side_panel(frame, body[1], model);
-            }
-        }
-        AppView::Setup => render_setup_screen(frame, vertical[2], model),
-        AppView::Runs => render_runs_screen(frame, vertical[2], model),
-        AppView::Reports => render_reports_screen(frame, vertical[2], model),
-        AppView::Conflicts => render_conflicts_screen(frame, vertical[2], model),
+        AppView::Dashboard => render_dashboard(frame, body, model),
+        AppView::Setup => render_setup_screen(frame, body, model),
+        AppView::Runs => render_runs_screen(frame, body, model),
+        AppView::Reports => render_reports_screen(frame, body, model),
+        AppView::Conflicts => render_conflicts_screen(frame, body, model),
     }
-    if has_notifications {
-        render_notifications(frame, vertical[3], model);
-        render_command_bar(frame, vertical[4], model);
-    } else {
-        render_command_bar(frame, vertical[3], model);
-    }
+
+    render_hint_bar(frame, hint, model);
+
     if model.command_palette_open {
         render_command_palette(frame, area, model);
     }
 }
 
-fn render_header(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
-    let title = Line::from(vec![
+fn render_dashboard(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+    if area.width < 100 {
+        let body = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(5), Constraint::Length(8)])
+            .split(area);
+        render_pair_table(frame, body[0], model);
+        render_side_panel(frame, body[1], model);
+    } else {
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+            .split(area);
+        render_pair_table(frame, body[0], model);
+        render_side_panel(frame, body[1], model);
+    }
+}
+
+const TAB_VIEWS: [AppView; 5] = [
+    AppView::Dashboard,
+    AppView::Reports,
+    AppView::Conflicts,
+    AppView::Runs,
+    AppView::Setup,
+];
+
+fn cycle_view(view: AppView, offset: isize) -> AppView {
+    let current = TAB_VIEWS.iter().position(|item| *item == view).unwrap_or(0);
+    let next = (current as isize + offset).rem_euclid(TAB_VIEWS.len() as isize) as usize;
+    TAB_VIEWS[next]
+}
+
+fn show_view_event(view: AppView) -> AppEvent {
+    match view {
+        AppView::Dashboard => AppEvent::ShowDashboard,
+        AppView::Reports => AppEvent::ShowReports,
+        AppView::Conflicts => AppEvent::ShowConflicts,
+        AppView::Runs => AppEvent::ShowRuns,
+        AppView::Setup => AppEvent::ShowSetup,
+    }
+}
+
+fn tab_label(view: AppView) -> &'static str {
+    match view {
+        AppView::Dashboard => "Pairs",
+        AppView::Reports => "Plan",
+        AppView::Conflicts => "Conflicts",
+        AppView::Runs => "Runs",
+        AppView::Setup => "Setup",
+    }
+}
+
+fn render_status_bar(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+    let status_spans = status_cluster_spans(model);
+    let status_width: u16 = status_spans
+        .iter()
+        .map(|span| span.content.chars().count() as u16)
+        .sum();
+
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(10), Constraint::Length(status_width + 1)])
+        .split(area);
+
+    let mut tabs = vec![
         Span::styled(
             "insync",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw("  iCloud <-> Google Calendar"),
-    ]);
-    let subtitle = Line::from(vec![
-        Span::raw("Status "),
-        Span::styled(
-            status_label(model.status),
-            Style::default().fg(status_color(model.status)),
-        ),
-        Span::raw("  View "),
-        Span::styled(
-            view_label(model.view),
+        Span::raw("  "),
+    ];
+    for (index, view) in TAB_VIEWS.iter().enumerate() {
+        if index > 0 {
+            tabs.push(Span::styled(" · ", Style::default().fg(color_muted())));
+        }
+        let active = model.view == *view;
+        let mut label = tab_label(*view).to_string();
+        if *view == AppView::Conflicts && model.conflict_count > 0 {
+            label = format!("{label} {}", model.conflict_count);
+        }
+        let style = if active {
             Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  Filter "),
-        Span::styled(
-            model.run_filter.label(),
-            Style::default().fg(match model.view {
-                AppView::Runs => color_warning(),
-                AppView::Reports => color_muted(),
-                _ => color_muted(),
-            }),
-        ),
-        Span::raw("  Report "),
-        Span::styled(
-            format!(
-                "{}/{}",
-                model.report_filter.label(),
-                model.report_sort.label()
-            ),
-            Style::default().fg(if model.view == AppView::Reports {
-                color_warning()
-            } else {
-                color_muted()
-            }),
-        ),
-        Span::raw("  Selected "),
-        Span::styled(
-            model.selected_pair_id.as_deref().unwrap_or("-"),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]);
+                .fg(Color::Black)
+                .bg(view_accent(*view))
+                .add_modifier(Modifier::BOLD)
+        } else if *view == AppView::Conflicts && model.conflict_count > 0 {
+            Style::default().fg(color_warning())
+        } else {
+            Style::default().fg(color_neutral())
+        };
+        tabs.push(Span::styled(format!(" {label} "), style));
+    }
 
+    frame.render_widget(Paragraph::new(Line::from(tabs)), chunks[0]);
     frame.render_widget(
-        Paragraph::new(vec![title, subtitle])
-            .block(chrome_block("Dashboard"))
-            .alignment(Alignment::Left),
-        area,
-    );
-}
-
-fn render_metrics(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-        ])
-        .split(area);
-    let enabled_ratio = if model.pairs.is_empty() {
-        0.0
-    } else {
-        model.enabled_pair_count() as f64 / model.pairs.len() as f64
-    };
-
-    render_metric(
-        frame,
-        chunks[0],
-        "Sync",
-        status_label(model.status),
-        status_color(model.status),
-    );
-    frame.render_widget(
-        Gauge::default()
-            .block(chrome_block("Enabled Pairs"))
-            .gauge_style(Style::default().fg(pair_gauge_color(model)))
-            .ratio(enabled_ratio)
-            .label(format!(
-                "{}/{}",
-                model.enabled_pair_count(),
-                model.pairs.len()
-            )),
+        Paragraph::new(Line::from(status_spans)).alignment(Alignment::Right),
         chunks[1],
     );
-    render_metric(
-        frame,
-        chunks[2],
-        "Conflicts",
-        &model.conflict_count.to_string(),
-        if model.conflict_count == 0 {
-            color_success()
-        } else {
-            color_warning()
-        },
-    );
-    render_metric(
-        frame,
-        chunks[3],
-        "Last Run",
-        last_run_label(model).as_str(),
-        match model.last_run_status.as_deref() {
-            Some("failed") => color_danger(),
-            Some("completed") => color_success(),
-            Some("running") => color_running(),
-            _ => color_neutral(),
-        },
-    );
 }
 
-fn render_metric(frame: &mut Frame<'_>, area: Rect, title: &str, value: &str, color: Color) {
-    frame.render_widget(
-        Paragraph::new(value)
-            .style(Style::default().fg(color).add_modifier(Modifier::BOLD))
-            .block(chrome_block(title))
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: true }),
-        area,
-    );
+fn status_cluster_spans(model: &AppModel) -> Vec<Span<'static>> {
+    let mut spans = vec![
+        Span::styled(
+            "●",
+            Style::default()
+                .fg(status_color(model.status))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            status_label(model.status).to_string(),
+            Style::default().fg(status_color(model.status)),
+        ),
+    ];
+
+    if model.conflict_count > 0 {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!("⚠ {} conflict", model.conflict_count),
+            Style::default().fg(color_warning()),
+        ));
+    }
+
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(
+        format!("⟳ {}", short_run_label(model)),
+        Style::default().fg(last_run_color(model)),
+    ));
+
+    if model.background_paused {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            "⏸ paused".to_string(),
+            Style::default().fg(color_warning()),
+        ));
+    }
+
+    spans
+}
+
+fn short_run_label(model: &AppModel) -> String {
+    match (
+        model.last_run_status.as_deref(),
+        model.last_run_at.as_deref(),
+    ) {
+        (Some(status), Some(at)) => format!("{status} {}", relative_time(at)),
+        (Some(status), None) => status.to_string(),
+        _ => "no runs".to_string(),
+    }
+}
+
+fn top_alert(model: &AppModel) -> Option<(AppNotificationSeverity, String, usize)> {
+    let notifications = model.shell_snapshot().notifications;
+    let total = notifications.len();
+    notifications
+        .into_iter()
+        .next()
+        .map(|notification| (notification.severity, notification.message, total))
+}
+
+fn render_alert(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    alert: &(AppNotificationSeverity, String, usize),
+) {
+    let (severity, message, total) = alert;
+    let mut spans = vec![
+        Span::styled(
+            format!(" {} ", notification_label(*severity)),
+            Style::default()
+                .fg(Color::Black)
+                .bg(notification_color(*severity))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            compact_string(message, usize::from(area.width.saturating_sub(20)).max(12)),
+            Style::default().fg(notification_color(*severity)),
+        ),
+    ];
+    if *total > 1 {
+        spans.push(Span::styled(
+            format!("  (+{} more)", total - 1),
+            Style::default().fg(color_muted()),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn hint(key: &'static str, label: &'static str, color: Color) -> Vec<Span<'static>> {
+    vec![
+        Span::styled(key, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" {label}   "), Style::default().fg(color_neutral())),
+    ]
+}
+
+fn render_hint_bar(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+    let mut spans = Vec::new();
+    spans.extend(hint("d", "dry-run", color_running()));
+    spans.extend(hint("a", "apply", color_danger()));
+    match model.view {
+        AppView::Conflicts => {
+            spans.extend(hint("g/i", "resolve", color_warning()));
+            spans.extend(hint("r", "refresh", color_warning()));
+        }
+        AppView::Runs => {
+            spans.extend(hint("f", "filter", color_warning()));
+        }
+        AppView::Reports => {
+            spans.extend(hint("f", "filter", color_warning()));
+            spans.extend(hint("t", "sort", color_checking()));
+        }
+        AppView::Setup => {
+            spans.extend(hint("r", "refresh", color_warning()));
+        }
+        AppView::Dashboard => {
+            spans.extend(hint(
+                "b",
+                if model.background_paused {
+                    "resume"
+                } else {
+                    "pause"
+                },
+                color_warning(),
+            ));
+        }
+    }
+    spans.extend(hint("j/k", "move", Color::Blue));
+    spans.extend(hint("tab", "next", color_muted()));
+    spans.extend(hint(":", "cmds", color_running()));
+    spans.extend(hint("q", "quit", Color::Red));
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn view_accent(view: AppView) -> Color {
+    match view {
+        AppView::Dashboard => Color::Cyan,
+        AppView::Reports => color_checking(),
+        AppView::Conflicts => color_warning(),
+        AppView::Runs => color_success(),
+        AppView::Setup => color_neutral(),
+    }
 }
 
 fn render_pair_table(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
@@ -3384,10 +3595,53 @@ fn render_side_panel(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(54), Constraint::Percentage(46)])
+        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
         .split(area);
     render_selected_pair(frame, chunks[0], model);
-    render_activity(frame, chunks[1], model);
+    render_recent_runs(frame, chunks[1], model);
+}
+
+fn render_recent_runs(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+    if model.runs.is_empty() {
+        render_empty_state(
+            frame,
+            area,
+            "Recent Activity",
+            &["No sync runs yet.", "Press d for a dry-run."],
+            color_muted(),
+        );
+        return;
+    }
+
+    let rows = usize::from(area.height.saturating_sub(2)).max(1);
+    let items = model
+        .runs
+        .iter()
+        .take(rows)
+        .map(|run| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{:<9}", run.status),
+                    Style::default().fg(run_status_color(&run.status)),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    relative_time(&run.started_at),
+                    Style::default().fg(color_muted()),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    run.pair_id.as_deref().unwrap_or("-").to_string(),
+                    Style::default().fg(Color::White),
+                ),
+            ]))
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        List::new(items).block(chrome_block("Recent Activity")),
+        area,
+    );
 }
 
 fn pair_row(pair: &insync_app::AppPair, model: &AppModel, compact: bool) -> Row<'static> {
@@ -3551,59 +3805,6 @@ fn render_selected_pair(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     );
 }
 
-fn render_activity(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
-    let items = vec![
-        activity_item(
-            format!("Status: {}", status_label(model.status)),
-            status_color(model.status),
-        ),
-        activity_item(
-            format!("Unresolved conflicts: {}", model.conflict_count),
-            if model.conflict_count == 0 {
-                color_success()
-            } else {
-                color_warning()
-            },
-        ),
-        activity_item(
-            format!("Last run: {}", last_run_label(model)),
-            last_run_color(model),
-        ),
-        activity_item(
-            format!("Next run: {}", next_run_label(model)),
-            if model.next_run_at.is_some() {
-                color_neutral()
-            } else {
-                color_muted()
-            },
-        ),
-        activity_item(
-            format!(
-                "Recent error: {}",
-                model.recent_error.as_deref().unwrap_or("-")
-            ),
-            if model.recent_error.is_some() {
-                color_danger()
-            } else {
-                color_muted()
-            },
-        ),
-        activity_item(
-            format!(
-                "App message: {}",
-                model.last_message.as_deref().unwrap_or("-")
-            ),
-            if model.last_message.is_some() {
-                color_neutral()
-            } else {
-                color_muted()
-            },
-        ),
-    ];
-
-    frame.render_widget(List::new(items).block(chrome_block("Activity")), area);
-}
-
 fn render_setup_screen(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     if area.width < 100 {
         let body = Layout::default()
@@ -3759,40 +3960,6 @@ fn setup_step_lines(prefix: &str, step: &AppSetupStep, area_width: u16) -> Vec<L
             compact_detail_value(&step.next_action, area_width)
         )),
     ]
-}
-
-fn render_notifications(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
-    let shell = model.shell_snapshot();
-    let items = shell
-        .notifications
-        .iter()
-        .take(3)
-        .map(|notification| {
-            let severity = notification.severity;
-            let message_width = usize::from(area.width.saturating_sub(16)).clamp(18, 96);
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    notification_label(severity),
-                    Style::default()
-                        .fg(notification_color(severity))
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" "),
-                Span::styled(
-                    compact_string(&notification.message, message_width),
-                    Style::default().fg(Color::White),
-                ),
-            ]))
-        })
-        .collect::<Vec<_>>();
-
-    let title = if shell.notifications.len() > 3 {
-        format!("Notifications (+{})", shell.notifications.len() - 3)
-    } else {
-        "Notifications".to_string()
-    };
-
-    frame.render_widget(List::new(items).block(chrome_block(&title)), area);
 }
 
 fn render_runs_screen(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
@@ -3979,21 +4146,96 @@ fn render_run_detail(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
 }
 
 fn render_reports_screen(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
-    if area.width < 100 {
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(4), Constraint::Min(3)])
+        .split(area);
+    render_plan_summary(frame, outer[0], model);
+
+    let lower = outer[1];
+    if lower.width < 100 {
         let body = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-            .split(area);
+            .split(lower);
         render_report_table(frame, body[0], model);
         render_report_detail(frame, body[1], model);
     } else {
         let body = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(66), Constraint::Percentage(34)])
-            .split(area);
+            .split(lower);
         render_report_table(frame, body[0], model);
         render_report_detail(frame, body[1], model);
     }
+}
+
+fn plan_mode_color(mode: &str) -> Color {
+    match mode {
+        "apply" => color_running(),
+        _ => color_checking(),
+    }
+}
+
+fn render_plan_summary(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
+    let lines = if let Some(plan) = &model.plan {
+        let header = Line::from(vec![
+            Span::styled(
+                plan.mode.clone(),
+                Style::default()
+                    .fg(plan_mode_color(&plan.mode))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ·  ", Style::default().fg(color_muted())),
+            Span::styled(
+                format!("{} actions", plan.total_actions),
+                Style::default()
+                    .fg(color_neutral())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ·  ", Style::default().fg(color_muted())),
+            Span::raw(format!("{} pairs", plan.pair_counts.len())),
+            Span::styled("  ·  ", Style::default().fg(color_muted())),
+            Span::styled(
+                relative_time(&plan.generated_at),
+                Style::default().fg(color_muted()),
+            ),
+        ]);
+
+        let mut chips: Vec<Span> = Vec::new();
+        if plan.action_counts.is_empty() {
+            chips.push(Span::styled(
+                "no changes — calendars are already in sync",
+                Style::default().fg(color_success()),
+            ));
+        } else {
+            for (action, count) in &plan.action_counts {
+                if !chips.is_empty() {
+                    chips.push(Span::raw("   "));
+                }
+                chips.push(Span::styled(
+                    format!("{action} {count}"),
+                    Style::default().fg(report_action_color(action)),
+                ));
+            }
+        }
+        vec![header, Line::from(chips)]
+    } else {
+        vec![
+            Line::from(Span::styled(
+                "No plan yet",
+                Style::default()
+                    .fg(color_muted())
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "Press d to run a dry-run and preview every change before applying.",
+                Style::default().fg(color_muted()),
+            )),
+        ]
+    };
+
+    frame.render_widget(Paragraph::new(lines).block(chrome_block("Plan")), area);
 }
 
 fn render_report_table(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
@@ -4100,41 +4342,7 @@ fn report_row(index: usize, row: &AppReportRow, model: &AppModel, compact: bool)
 }
 
 fn render_report_detail(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
-    let lines = if let Some(row) = model.selected_report_row() {
-        vec![
-            Line::from(vec![Span::styled(
-                compact_string(&row.action, 32),
-                Style::default()
-                    .fg(report_action_color(&row.action))
-                    .add_modifier(Modifier::BOLD),
-            )]),
-            Line::from(format!(
-                "Pair: {}",
-                compact_detail_value(&row.pair_id, area.width)
-            )),
-            Line::from(format!(
-                "Title: {}",
-                compact_detail_value(&row.title, area.width)
-            )),
-            Line::from(format!(
-                "Reason: {}",
-                compact_detail_value(&row.reason, area.width)
-            )),
-            Line::from(format!(
-                "Resolution: {}",
-                compact_detail_value(&row.resolution, area.width)
-            )),
-            Line::from(format!(
-                "Present: Google {} / iCloud {}",
-                empty_dash(&row.google_present),
-                empty_dash(&row.icloud_present)
-            )),
-            Line::from(format!(
-                "Diff: {}",
-                compact_detail_value(empty_dash(&row.diff_fields), area.width)
-            )),
-        ]
-    } else {
+    let Some(row) = model.selected_report_row() else {
         render_empty_state(
             frame,
             area,
@@ -4148,12 +4356,107 @@ fn render_report_detail(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
         return;
     };
 
+    let mut lines = vec![
+        Line::from(vec![Span::styled(
+            compact_string(&row.action, 32),
+            Style::default()
+                .fg(report_action_color(&row.action))
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(format!(
+            "Pair: {}",
+            compact_detail_value(&row.pair_id, area.width)
+        )),
+        Line::from(format!(
+            "UID: {}",
+            compact_detail_value(empty_dash(&row.canonical_uid), area.width)
+        )),
+        Line::from(String::new()),
+    ];
+
+    for (label, key, google, icloud) in [
+        ("title", "title", &row.google_title, &row.icloud_title),
+        ("start", "start", &row.google_start, &row.icloud_start),
+        ("end", "end", &row.google_end, &row.icloud_end),
+        ("status", "status", &row.google_status, &row.icloud_status),
+    ] {
+        let changed = field_changed(&row.diff_fields, key);
+        lines.extend(field_comparison_lines(
+            label, google, icloud, changed, area.width,
+        ));
+    }
+
+    lines.push(Line::from(String::new()));
+    lines.push(Line::from(format!(
+        "Present: Google {} / iCloud {}",
+        empty_dash(&row.google_present),
+        empty_dash(&row.icloud_present)
+    )));
+    lines.push(Line::from(format!(
+        "Reason: {}",
+        compact_detail_value(empty_dash(&row.reason), area.width)
+    )));
+    lines.push(Line::from(format!(
+        "Resolution: {}",
+        compact_detail_value(empty_dash(&row.resolution), area.width)
+    )));
+    lines.push(Line::from(vec![
+        Span::raw("Diff: "),
+        Span::styled(
+            compact_detail_value(empty_dash(&row.diff_fields), area.width),
+            Style::default().fg(color_warning()),
+        ),
+    ]));
+
     frame.render_widget(
         Paragraph::new(lines)
             .block(chrome_block("Report Detail"))
             .wrap(Wrap { trim: true }),
         area,
     );
+}
+
+fn field_changed(diff_fields: &str, key: &str) -> bool {
+    diff_fields
+        .split(|c| c == '|' || c == ',' || c == ' ')
+        .any(|token| token.trim() == key)
+}
+
+fn field_comparison_lines(
+    label: &str,
+    google: &str,
+    icloud: &str,
+    changed: bool,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let name_style = if changed {
+        Style::default()
+            .fg(color_warning())
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(color_muted())
+    };
+    let google = empty_dash(google);
+    let icloud = empty_dash(icloud);
+
+    if google == icloud {
+        vec![Line::from(vec![
+            Span::styled(format!("{label:<8}"), name_style),
+            Span::raw(compact_detail_value(google, width)),
+        ])]
+    } else {
+        vec![
+            Line::from(Span::styled(label.to_string(), name_style)),
+            Line::from(vec![
+                Span::styled("  G ", Style::default().fg(color_checking())),
+                Span::raw(compact_detail_value(google, width)),
+            ]),
+            Line::from(vec![
+                Span::styled("  I ", Style::default().fg(color_running())),
+                Span::raw(compact_detail_value(icloud, width)),
+            ]),
+        ]
+    }
 }
 
 fn render_conflicts_screen(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
@@ -4440,131 +4743,6 @@ fn render_conflict_workbench(frame: &mut Frame<'_>, area: Rect, model: &AppModel
     );
 }
 
-fn render_command_bar(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
-    let mut spans = vec![
-        Span::styled(
-            "d",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" dry   "),
-        Span::styled(
-            "a",
-            Style::default()
-                .fg(color_danger())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" apply   "),
-        Span::styled(
-            "r",
-            Style::default()
-                .fg(color_warning())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" ref   "),
-        Span::styled(
-            "s",
-            Style::default()
-                .fg(color_neutral())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" set   "),
-        Span::styled(
-            "c",
-            Style::default()
-                .fg(color_warning())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" conf   "),
-        Span::styled(
-            "l",
-            Style::default()
-                .fg(color_success())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" runs   "),
-        Span::styled(
-            "v",
-            Style::default()
-                .fg(color_checking())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" report   "),
-        Span::styled(
-            "p",
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" pairs   "),
-        Span::styled(
-            "b",
-            Style::default()
-                .fg(color_warning())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(if model.background_paused {
-            " resume   "
-        } else {
-            " pause   "
-        }),
-        Span::styled(
-            ":",
-            Style::default()
-                .fg(color_running())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" pal   "),
-    ];
-
-    if model.view == AppView::Runs || model.view == AppView::Reports {
-        spans.extend([
-            Span::styled(
-                "f",
-                Style::default()
-                    .fg(color_warning())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" filter   "),
-        ]);
-    }
-    if model.view == AppView::Reports {
-        spans.extend([
-            Span::styled(
-                "t",
-                Style::default()
-                    .fg(color_checking())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" sort   "),
-        ]);
-    }
-
-    spans.extend([
-        Span::styled(
-            "j/k",
-            Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" move   "),
-        Span::styled(
-            "q",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" quit"),
-    ]);
-    let commands = Line::from(spans);
-
-    frame.render_widget(
-        Paragraph::new(commands)
-            .block(chrome_block("Commands"))
-            .alignment(Alignment::Center),
-        area,
-    );
-}
-
 fn render_command_palette(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     let area = centered_rect(72, 58, area);
     frame.render_widget(Clear, area);
@@ -4677,10 +4855,6 @@ fn render_empty_state(
     );
 }
 
-fn activity_item(value: String, color: Color) -> ListItem<'static> {
-    ListItem::new(value).style(Style::default().fg(color))
-}
-
 fn chrome_block<'a>(title: &'a str) -> Block<'a> {
     Block::default()
         .title(title)
@@ -4707,32 +4881,12 @@ fn status_color(status: AppStatus) -> Color {
     }
 }
 
-fn view_label(view: AppView) -> &'static str {
-    match view {
-        AppView::Dashboard => "pairs",
-        AppView::Setup => "setup",
-        AppView::Runs => "runs",
-        AppView::Reports => "reports",
-        AppView::Conflicts => "conflicts",
-    }
-}
-
 fn run_status_color(status: &str) -> Color {
     match status {
         "failed" => color_danger(),
         "completed" => color_success(),
         "running" => color_running(),
         _ => color_neutral(),
-    }
-}
-
-fn pair_gauge_color(model: &AppModel) -> Color {
-    if model.pairs.is_empty() {
-        color_muted()
-    } else if model.enabled_pair_count() == model.pairs.len() {
-        color_success()
-    } else {
-        color_warning()
     }
 }
 
@@ -4853,22 +5007,39 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         .split(vertical[1])[1]
 }
 
-fn last_run_label(model: &AppModel) -> String {
-    match (
-        model.last_run_status.as_deref(),
-        model.last_run_at.as_deref(),
-    ) {
-        (Some(status), Some(at)) => format!("{status} at {at}"),
-        (Some(status), None) => status.to_string(),
-        _ => "No runs yet".to_string(),
-    }
+fn now_timestamp() -> String {
+    Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
-fn next_run_label(model: &AppModel) -> String {
-    model
-        .next_run_at
-        .clone()
-        .unwrap_or_else(|| "not scheduled".to_string())
+fn relative_time(value: &str) -> String {
+    let parsed = DateTime::parse_from_rfc3339(value)
+        .map(|dt| dt.with_timezone(&Utc))
+        .or_else(|_| {
+            chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
+                .map(|naive| DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc))
+        });
+
+    let Ok(timestamp) = parsed else {
+        return value.to_string();
+    };
+
+    let delta = Utc::now().signed_duration_since(timestamp);
+    let seconds = delta.num_seconds();
+    if seconds < 0 {
+        return "soon".to_string();
+    }
+    if seconds < 60 {
+        return "just now".to_string();
+    }
+    let minutes = delta.num_minutes();
+    if minutes < 60 {
+        return format!("{minutes}m ago");
+    }
+    let hours = delta.num_hours();
+    if hours < 24 {
+        return format!("{hours}h ago");
+    }
+    format!("{}d ago", delta.num_days())
 }
 
 fn direction_label(direction: insync_core::SyncDirection) -> &'static str {
