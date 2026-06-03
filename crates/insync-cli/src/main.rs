@@ -14,7 +14,7 @@ use insync_app::{
 #[cfg(test)]
 use insync_app::{AppReportFilter, AppReportSort, AppRunFilter, AppSetupState};
 use insync_config::{
-    LOCAL_CONFIG_FILE, SecretStoreKind, SyncPairConfig, app_config_path,
+    LOCAL_CONFIG_FILE, SecretStoreKind, ServiceConfig, SyncPairConfig, app_config_path,
     credentials::{
         resolve_credentials, store_google_client_secret, store_google_refresh_token,
         store_icloud_app_password,
@@ -35,8 +35,8 @@ use insync_db::{
     },
 };
 use insync_engine::{
-    ConflictFilter, DoctorSummary, ManualResolution, ReportMode, RunMode, SyncEngine,
-    SyncProviders, UnresolvedConflictRow, UnresolvedConflictSummary,
+    ConflictFilter, DoctorSummary, ManualResolution, PlannedSyncSummary, ReportMode, RunMode,
+    SyncEngine, SyncProviders, UnresolvedConflictRow, UnresolvedConflictSummary,
 };
 use insync_providers::{
     CalendarProvider, ProviderCalendar, ProviderChangeSet, ProviderError, ProviderSyncCursor,
@@ -704,7 +704,16 @@ async fn main() -> Result<()> {
             let doctor = engine.doctor()?;
             let mut model = AppModel::from_config(&config);
             model.apply_runtime_snapshot(runtime_snapshot_from_doctor(&doctor, &config)?);
-            run_tui(model)?;
+            let providers = live_providers(config.clone(), &config_path)?;
+            run_tui(
+                model,
+                TuiRuntime {
+                    config,
+                    engine,
+                    providers,
+                },
+            )
+            .await?;
         }
     }
 
@@ -1541,6 +1550,61 @@ mod tests {
         assert_eq!(detail.icloud_href.as_deref(), Some("/cal/icloud-1.ics"));
         assert_eq!(detail.diff_fields, "title|start|status");
         assert!(detail.resolution_policy.contains("manual review"));
+    }
+
+    #[test]
+    fn tui_sync_helpers_summarize_and_map_report_rows() {
+        let summary = PlannedSyncSummary {
+            db_path: PathBuf::from(".insync/insync.db"),
+            configured_pair_count: 1,
+            enabled_pair_count: 1,
+            pair_summaries: Vec::new(),
+            action_counts: std::collections::BTreeMap::from([
+                ("create_icloud".to_string(), 2),
+                ("conflict".to_string(), 1),
+            ]),
+            resolution_counts: std::collections::BTreeMap::new(),
+            report_rows: Vec::new(),
+            mode: RunMode::DryRun,
+        };
+        let row = insync_engine::ReportRow {
+            pair_id: "personal".to_string(),
+            action: "create_icloud".to_string(),
+            canonical_uid: "uid-1".to_string(),
+            google_event_id: "google-1".to_string(),
+            google_ical_uid: "uid-1".to_string(),
+            icloud_href: String::new(),
+            icloud_uid: String::new(),
+            reason: String::new(),
+            resolution: String::new(),
+            conflict_policy: String::new(),
+            title: "Dentist".to_string(),
+            google_present: "yes".to_string(),
+            icloud_present: "no".to_string(),
+            google_title: "Dentist".to_string(),
+            icloud_title: String::new(),
+            google_start: "2026-06-02T12:00:00Z".to_string(),
+            icloud_start: String::new(),
+            google_end: "2026-06-02T13:00:00Z".to_string(),
+            icloud_end: String::new(),
+            google_status: "confirmed".to_string(),
+            icloud_status: String::new(),
+            google_hash: "hash-google".to_string(),
+            icloud_hash: String::new(),
+            diff_fields: "icloud_missing".to_string(),
+        };
+
+        let message = tui_sync_message(&summary);
+        let mapped = app_report_row(&row);
+
+        assert!(message.contains("dry-run finished"));
+        assert!(message.contains("conflict=1"));
+        assert!(message.contains("create_icloud=2"));
+        assert_eq!(mapped.pair_id, "personal");
+        assert_eq!(mapped.action, "create_icloud");
+        assert_eq!(mapped.title, "Dentist");
+        assert_eq!(mapped.google_present, "yes");
+        assert_eq!(mapped.icloud_present, "no");
     }
 
     #[test]
@@ -2625,6 +2689,13 @@ struct LiveProviders {
     icloud: IcloudCalDavProvider,
 }
 
+#[derive(Debug)]
+struct TuiRuntime {
+    config: ServiceConfig,
+    engine: SyncEngine,
+    providers: LiveProviders,
+}
+
 fn live_providers(
     mut config: insync_config::ServiceConfig,
     config_path: &PathBuf,
@@ -2792,7 +2863,7 @@ fn init_tracing() {
         .init();
 }
 
-fn run_tui(mut model: AppModel) -> Result<()> {
+async fn run_tui(mut model: AppModel, runtime: TuiRuntime) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -2818,7 +2889,7 @@ fn run_tui(mut model: AppModel) -> Result<()> {
                     }
                     KeyCode::Enter => {
                         let effects = model.update(AppEvent::ExecuteSelectedCommand);
-                        if apply_tui_effects(&mut model, effects) {
+                        if apply_tui_effects(&mut model, &runtime, effects).await {
                             break Ok(());
                         }
                     }
@@ -2877,33 +2948,33 @@ fn run_tui(mut model: AppModel) -> Result<()> {
                     }
                     KeyCode::Char('d') => {
                         let effects = model.update(AppEvent::ExecuteCommand(AppCommand::DryRun));
-                        if apply_tui_effects(&mut model, effects) {
+                        if apply_tui_effects(&mut model, &runtime, effects).await {
                             break Ok(());
                         }
                     }
                     KeyCode::Char('a') => {
                         let effects = model.update(AppEvent::ExecuteCommand(AppCommand::ApplyRun));
-                        if apply_tui_effects(&mut model, effects) {
+                        if apply_tui_effects(&mut model, &runtime, effects).await {
                             break Ok(());
                         }
                     }
                     KeyCode::Char('r') => {
                         let effects =
                             model.update(AppEvent::ExecuteCommand(AppCommand::RefreshConflicts));
-                        if apply_tui_effects(&mut model, effects) {
+                        if apply_tui_effects(&mut model, &runtime, effects).await {
                             break Ok(());
                         }
                     }
                     KeyCode::Char('s') => {
                         let effects = model.update(AppEvent::ExecuteCommand(AppCommand::OpenSetup));
-                        if apply_tui_effects(&mut model, effects) {
+                        if apply_tui_effects(&mut model, &runtime, effects).await {
                             break Ok(());
                         }
                     }
                     KeyCode::Char('b') => {
                         let effects = model
                             .update(AppEvent::ExecuteCommand(AppCommand::ToggleBackgroundPause));
-                        if apply_tui_effects(&mut model, effects) {
+                        if apply_tui_effects(&mut model, &runtime, effects).await {
                             break Ok(());
                         }
                     }
@@ -2924,49 +2995,127 @@ fn run_tui(mut model: AppModel) -> Result<()> {
     result
 }
 
-fn apply_tui_effects(model: &mut AppModel, effects: Vec<AppEffect>) -> bool {
+async fn apply_tui_effects(
+    model: &mut AppModel,
+    runtime: &TuiRuntime,
+    effects: Vec<AppEffect>,
+) -> bool {
     for effect in effects {
-        match effect {
-            AppEffect::RunDrySync => {
-                model.update(AppEvent::EngineFinished {
-                    message: "dry-run requested".to_string(),
-                });
-            }
-            AppEffect::RunApplySync => {
-                model.update(AppEvent::EngineFinished {
-                    message: "apply requested".to_string(),
-                });
-            }
+        let result = match effect {
+            AppEffect::RunDrySync => run_tui_sync(model, runtime, RunMode::DryRun).await,
+            AppEffect::RunApplySync => run_tui_sync(model, runtime, RunMode::Apply).await,
             AppEffect::LoadConflicts => {
-                model.update(AppEvent::EngineFinished {
-                    message: "conflict refresh requested".to_string(),
-                });
+                refresh_tui_runtime_snapshot(model, runtime, None, "conflicts refreshed")
             }
             AppEffect::ShowSetup => {
                 model.update(AppEvent::EngineFinished {
                     message: "setup requested".to_string(),
                 });
+                Ok(())
             }
             AppEffect::ExportDryRunReport => {
                 model.update(AppEvent::EngineFinished {
                     message: "report export requested".to_string(),
                 });
+                Ok(())
             }
             AppEffect::StartBackgroundScheduler => {
                 model.update(AppEvent::EngineFinished {
                     message: "background scheduler start requested".to_string(),
                 });
+                Ok(())
             }
             AppEffect::StopBackgroundScheduler => {
                 model.update(AppEvent::EngineFinished {
                     message: "background scheduler stop requested".to_string(),
                 });
+                Ok(())
             }
             AppEffect::Quit => return true,
+        };
+
+        if let Err(error) = result {
+            model.update(AppEvent::EngineFailed {
+                message: error.to_string(),
+            });
+            return false;
         }
     }
 
     false
+}
+
+async fn run_tui_sync(model: &mut AppModel, runtime: &TuiRuntime, mode: RunMode) -> Result<()> {
+    let summary = runtime
+        .engine
+        .plan_once_with_providers_and_report_mode(
+            mode,
+            SyncProviders {
+                google: &runtime.providers.google,
+                icloud: &runtime.providers.icloud,
+            },
+            ReportMode::ActionsOnly,
+        )
+        .await?;
+    let report_rows = summary
+        .report_rows
+        .iter()
+        .map(app_report_row)
+        .collect::<Vec<_>>();
+    let message = tui_sync_message(&summary);
+
+    refresh_tui_runtime_snapshot(model, runtime, Some(report_rows), &message)
+}
+
+fn refresh_tui_runtime_snapshot(
+    model: &mut AppModel,
+    runtime: &TuiRuntime,
+    report_rows: Option<Vec<AppReportRow>>,
+    message: &str,
+) -> Result<()> {
+    let doctor = runtime.engine.doctor()?;
+    let mut snapshot = runtime_snapshot_from_doctor(&doctor, &runtime.config)?;
+    match report_rows {
+        Some(report_rows) => snapshot.report_rows = report_rows,
+        None => snapshot.report_rows = model.report_rows.clone(),
+    }
+    model.apply_runtime_snapshot(snapshot);
+    model.update(AppEvent::EngineFinished {
+        message: message.to_string(),
+    });
+    Ok(())
+}
+
+fn app_report_row(row: &insync_engine::ReportRow) -> AppReportRow {
+    AppReportRow {
+        pair_id: row.pair_id.clone(),
+        action: row.action.clone(),
+        reason: row.reason.clone(),
+        resolution: row.resolution.clone(),
+        title: row.title.clone(),
+        google_present: row.google_present.clone(),
+        icloud_present: row.icloud_present.clone(),
+        diff_fields: row.diff_fields.clone(),
+    }
+}
+
+fn tui_sync_message(summary: &PlannedSyncSummary) -> String {
+    let action_summary = summary
+        .action_counts
+        .iter()
+        .map(|(action, count)| format!("{action}={count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mode = match summary.mode {
+        RunMode::DryRun => "dry-run finished",
+        RunMode::Apply => "apply finished",
+    };
+
+    if action_summary.is_empty() {
+        format!("{mode}: no actions")
+    } else {
+        format!("{mode}: {action_summary}")
+    }
 }
 
 fn draw_tui(frame: &mut Frame<'_>, model: &AppModel) {
