@@ -79,6 +79,12 @@ pub enum EngineError {
         canonical_uid: String,
         field: &'static str,
     },
+    #[error("{action} failed for event {summary}: {source}")]
+    ApplyEvent {
+        action: &'static str,
+        summary: String,
+        source: ProviderError,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -745,6 +751,19 @@ fn provider_retry_delay(_attempt: usize) -> Duration {
     Duration::from_millis(1)
 }
 
+fn apply_event_summary(event: &CanonicalEvent) -> String {
+    let start = match &event.start {
+        EventDateTime::Date { value } => value.to_string(),
+        EventDateTime::DateTime { value, .. } => value.to_rfc3339(),
+    };
+    let title = if event.title.is_empty() {
+        "(untitled)"
+    } else {
+        event.title.as_str()
+    };
+    format!("{} \"{title}\" @ {start}", event.canonical_uid)
+}
+
 async fn apply_actions(
     conn: &rusqlite::Connection,
     config: &ServiceConfig,
@@ -792,7 +811,12 @@ async fn apply_actions(
                         .google
                         .create_event(&pair.google_calendar_id, &action.event)
                 })
-                .await?;
+                .await
+                .map_err(|source| EngineError::ApplyEvent {
+                    action: "create_google",
+                    summary: apply_event_summary(&action.event),
+                    source,
+                })?;
                 upsert_event_link(conn, link_after_google_write(&pair.id, action, meta))?;
             }
             PlannedAction::CreateIcloud(action) => {
@@ -832,7 +856,13 @@ async fn apply_actions(
                         });
                         continue;
                     }
-                    Err(error) => return Err(error.into()),
+                    Err(error) => {
+                        return Err(EngineError::ApplyEvent {
+                            action: "create_icloud",
+                            summary: apply_event_summary(&action.event),
+                            source: error,
+                        });
+                    }
                 };
                 upsert_event_link(conn, link_after_icloud_write(&pair.id, action, meta))?;
             }
@@ -849,7 +879,12 @@ async fn apply_actions(
                             .and_then(|link| link.google_etag.as_deref()),
                     )
                 })
-                .await?;
+                .await
+                .map_err(|source| EngineError::ApplyEvent {
+                    action: "update_google",
+                    summary: apply_event_summary(&action.event),
+                    source,
+                })?;
                 upsert_event_link(conn, link_after_google_write(&pair.id, action, meta))?;
             }
             PlannedAction::UpdateIcloud(action) => {
@@ -865,7 +900,12 @@ async fn apply_actions(
                             .and_then(|link| link.icloud_etag.as_deref()),
                     )
                 })
-                .await?;
+                .await
+                .map_err(|source| EngineError::ApplyEvent {
+                    action: "update_icloud",
+                    summary: apply_event_summary(&action.event),
+                    source,
+                })?;
                 upsert_event_link(conn, link_after_icloud_write(&pair.id, action, meta))?;
             }
             PlannedAction::DeleteGoogle(action) => {
@@ -880,7 +920,12 @@ async fn apply_actions(
                             .and_then(|link| link.google_etag.as_deref()),
                     )
                 })
-                .await?;
+                .await
+                .map_err(|source| EngineError::ApplyEvent {
+                    action: "delete_google",
+                    summary: apply_event_summary(&action.event),
+                    source,
+                })?;
                 upsert_event_link(
                     conn,
                     event_link_upsert(
@@ -909,7 +954,12 @@ async fn apply_actions(
                             .and_then(|link| link.icloud_etag.as_deref()),
                     )
                 })
-                .await?;
+                .await
+                .map_err(|source| EngineError::ApplyEvent {
+                    action: "delete_icloud",
+                    summary: apply_event_summary(&action.event),
+                    source,
+                })?;
                 upsert_event_link(
                     conn,
                     event_link_upsert(
