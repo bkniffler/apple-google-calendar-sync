@@ -1,13 +1,13 @@
 # TODO
 
-This is the working backlog for moving insync from the current Bun/TypeScript
-service to a Rust application with a strong terminal UI, background sync, and a
-future interchangeable taskbar/menu-bar interface.
+This is the working backlog for insync as a Rust application with a strong
+terminal UI, background sync, and a future interchangeable taskbar/menu-bar
+interface.
 
 ## Guiding Shape
 
-- Keep the TypeScript app working until the Rust version reaches dry-run and
-  apply parity.
+- Keep sync writes conservative until Rust apply is proven on throwaway
+  calendars.
 - Keep sync decisions in pure, heavily tested Rust code.
 - Keep database access explicit: SQLite, raw SQL migrations, typed repositories.
 - Keep UI logic shell-independent: TUI now, tray/taskbar later.
@@ -15,31 +15,32 @@ future interchangeable taskbar/menu-bar interface.
 
 ## 1. Rust Workspace
 
-- [x] Commit the initial `rust/` workspace scaffold.
-- [x] Add CI for `cd rust && cargo fmt --check && cargo test`.
-- [x] Decide whether the root repo keeps both Bun and Rust checks during the
-      migration or adds a dedicated Rust workflow.
+- [x] Commit the initial Rust workspace scaffold.
+- [x] Move the Rust workspace to the repository root.
+- [x] Remove the legacy implementation.
+- [x] Add CI for `cargo fmt --check && cargo test`.
+- [x] Decide the root CI shape after the Rust move.
 - [x] Add release/profile defaults once the CLI starts doing real work.
 
 ## 2. Core Sync Logic
 
-- [x] Port canonical event hashing from `src/sync/event-hash.ts`.
+- [x] Port canonical event hashing from the legacy sync implementation.
 - [x] Add the first Rust two-way planner implementation with event links,
       hashes, directions, conflict policies, and auto-resolution metadata.
-- [x] Port the existing hash tests and the current automatic conflict policy
-      tests from `src/sync/planner.test.ts`.
+- [x] Port the existing hash tests and automatic conflict policy tests from the
+      legacy sync implementation.
 - [x] Add focused planner coverage for linked updates, snapshots, manual
       conflicts, provider-winner policies, delete-wins, one-way direction
       guards, and known iCloud UID collisions.
-- [x] Port the full TypeScript planner into `insync-core`.
-- [x] Port all planner tests from `src/sync/planner.test.ts`.
+- [x] Port the full legacy planner into `insync-core`.
+- [x] Port all legacy planner tests.
 - [x] Cover initial sync, linked sync, one-way directions, deletes, update
       detection, and no-op snapshots.
 - [x] Cover automatic conflict policies:
       `google_wins`, `icloud_wins`, `newest_updated_wins`, `update_wins`,
       `delete_wins`, and manual fallback.
 - [x] Cover iCloud UID collision handling and known-collision suppression.
-- [x] Add fixture-based tests that compare TypeScript and Rust decisions for
+- [x] Add fixture-based tests that compare legacy and Rust decisions for
       representative dry-run reports.
 
 ## 3. SQLite Layer
@@ -89,7 +90,7 @@ future interchangeable taskbar/menu-bar interface.
 - [x] Implement iCloud CalDAV calendar discovery.
 - [x] Implement iCloud event list, create, update, delete.
 - [x] Port iCloud cross-calendar UID collision probing and metadata reuse from
-      the TypeScript provider.
+      the legacy provider.
 - [x] Add typed provider errors for auth, rate limits, precondition failures,
       UID collisions, network failures, and mapping failures.
 - [x] Emit UID collision errors from iCloud cross-calendar collision probing.
@@ -129,8 +130,8 @@ future interchangeable taskbar/menu-bar interface.
 - [x] Recreate CSV dry-run reports in Rust.
 - [x] Include action, reason, resolution, conflict policy, pair ID, provider IDs,
       timestamps, and hashes where useful.
-- [x] Keep report rows on provider-backed dry-run plans and write CSV with the
-      Bun-compatible column names.
+- [x] Keep report rows on provider-backed dry-run plans and write CSV with
+      stable column names.
 - [x] Wire fixture-backed CLI dry-run planning and report writing.
 - [x] Support `--report-all` for full snapshot/debug reports.
 - [x] Add summary counts by pair, action, reason, and resolution.
@@ -220,26 +221,21 @@ border.
 
 ## 14. Packaging And Release
 
-- [x] Add `cargo install --path rust/crates/insync-cli` instructions.
+- [x] Add `cargo install --path crates/insync-cli` instructions.
 - [x] Add release builds for macOS, Linux, and Windows.
 - [x] Decide binary name and package naming.
 - [x] Add bundled/default config search order documentation.
-- [x] Add migration docs from Bun to Rust.
+- [x] Add apply cutover documentation.
 - [x] Add GitHub Actions artifact builds.
 - [ ] Add signed/notarized macOS builds if we ship a menu-bar app.
 
 ## 15. Cutover
 
-- [x] Add repeatable TypeScript/Rust dry-run comparison harness.
-- [ ] Run TypeScript and Rust dry-runs against the same calendars.
-- [ ] Compare action counts, conflict counts, and CSV report rows.
+- [x] Remove archived legacy implementation after Rust parity work.
 - [ ] Run Rust apply against test calendars.
 - [ ] Run Rust apply against real calendars after repeated clean dry-runs.
-- [ ] Keep TypeScript fallback until Rust apply has proven stable.
-- [ ] Archive or remove the TypeScript implementation after parity.
 
 ## Immediate Next Step
 
-Run `bun run parity:dry-run` against the configured calendars, inspect
-`.insync/parity/comparison.json`, and only then run Rust apply against
-throwaway calendars.
+Run repeated Rust dry-runs against the configured calendars, inspect the CSV and
+JSON summaries, and only then run Rust apply against throwaway calendars.

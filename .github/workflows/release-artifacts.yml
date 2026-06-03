@@ -27,10 +27,6 @@ jobs:
             os: windows-latest
             exe: ".exe"
 
-    defaults:
-      run:
-        working-directory: rust
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -43,7 +39,7 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: rust -> target
+          workspaces: . -> target
 
       - name: Build
         run: cargo build --release --locked -p insync-cli
@@ -52,5 +48,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: insync-${{ matrix.label }}
-          path: rust/target/release/insync${{ matrix.exe }}
+          path: target/release/insync${{ matrix.exe }}
           if-no-files-found: error

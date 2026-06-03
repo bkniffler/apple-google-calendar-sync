@@ -1,4 +1,3 @@
-node_modules/
 .env
 insync.local.json
 .insync/
@@ -7,4 +6,3 @@ insync.local.json
 *.db-wal
 dist/
 target/
-rust/target/

@@ -1003,10 +1003,8 @@ mod tests {
     }
 
     fn planner_parity_fixture() -> PlannerParityFixture {
-        serde_json::from_str(include_str!(
-            "../../../../test-fixtures/planner-parity.json"
-        ))
-        .expect("planner parity fixture should parse")
+        serde_json::from_str(include_str!("../../../test-fixtures/planner-parity.json"))
+            .expect("planner parity fixture should parse")
     }
 
     fn fixture_event(provider: ProviderName, spec: &EventSpec) -> CanonicalEvent {

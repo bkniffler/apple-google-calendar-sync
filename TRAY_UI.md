@@ -80,7 +80,7 @@ tray binary.
 Keep the current core crates as-is and add a separate shell crate later:
 
 ```text
-rust/crates/
+crates/
   insync-app/         shared model, actions, setup state, notifications
   insync-engine/      sync orchestration
   insync-cli/         CLI, TUI, daemon, background install
