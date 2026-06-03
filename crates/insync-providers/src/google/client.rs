@@ -151,7 +151,11 @@ impl GoogleCalendarProvider {
                 return Err(ProviderError::PreconditionFailed(ProviderName::Google));
             }
             if !status.is_success() {
-                let error = ProviderError::http(ProviderName::Google, status.as_u16(), text);
+                let error = ProviderError::http(
+                    ProviderName::Google,
+                    status.as_u16(),
+                    format!("{method} {path}: {text}"),
+                );
                 if error.is_rate_limited() && attempt < 5 {
                     time::sleep(rate_limit_delay(attempt)).await;
                     continue;
@@ -220,7 +224,11 @@ impl GoogleCalendarProvider {
                 return Err(ProviderError::PreconditionFailed(ProviderName::Google));
             }
             if !status.is_success() {
-                let error = ProviderError::http(ProviderName::Google, status.as_u16(), text);
+                let error = ProviderError::http(
+                    ProviderName::Google,
+                    status.as_u16(),
+                    format!("{method} {path}: {text}"),
+                );
                 if error.is_rate_limited() && attempt < 5 {
                     time::sleep(rate_limit_delay(attempt)).await;
                     continue;
