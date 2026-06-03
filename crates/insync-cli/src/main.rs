@@ -1564,6 +1564,7 @@ mod tests {
             icloud_href: Some("/cal/icloud-1.ics".to_string()),
             diff_fields: "title|start|status".to_string(),
             created_at: "2026-06-02 12:01:00".to_string(),
+            queued_resolution: Some("iCloud wins".to_string()),
         }];
 
         let output = render_tui_to_text(&model, 130, 36);
@@ -1580,6 +1581,7 @@ mod tests {
         assert!(output.contains("uid-1"));
         assert!(output.contains("g/i/x/u resolve"));
         assert!(output.contains("Resolve group:"));
+        assert!(output.contains("Queued: iCloud wins"));
     }
 
     #[test]
@@ -2534,6 +2536,19 @@ fn conflict_detail_snapshot(row: UnresolvedConflictRow) -> AppConflictDetail {
         icloud_href: icloud.and_then(snapshot_icloud_href),
         reason: row.reason,
         created_at: row.created_at,
+        queued_resolution: row
+            .manual_resolution
+            .map(|resolution| humanize_resolution(resolution.as_str()).to_string()),
+    }
+}
+
+fn humanize_resolution(value: &str) -> &'static str {
+    match value {
+        "google_wins" => "Google wins",
+        "icloud_wins" => "iCloud wins",
+        "delete_wins" => "delete wins",
+        "update_wins" => "update wins",
+        _ => "queued",
     }
 }
 
@@ -3235,7 +3250,10 @@ fn resolve_tui_conflicts(
             resolved += 1;
         }
     }
-    let message = format!("queued {} for {resolved} conflict(s)", resolution.label());
+    let message = format!(
+        "queued {} for {resolved} conflict(s) — run apply (a) to write",
+        resolution.label()
+    );
     refresh_tui_runtime_snapshot(model, runtime, None, None, &message)
 }
 
@@ -4926,6 +4944,24 @@ fn render_conflict_workbench(frame: &mut Frame<'_>, area: Rect, model: &AppModel
             compact_string(detail.icloud_href.as_deref().unwrap_or("-"), 28)
         )),
         Line::from(String::new()),
+        match detail.queued_resolution.as_deref() {
+            Some(label) => Line::from(vec![
+                Span::styled(
+                    "Queued: ",
+                    Style::default()
+                        .fg(color_success())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{label} — applies on next apply (a)"),
+                    Style::default().fg(color_success()),
+                ),
+            ]),
+            None => Line::from(Span::styled(
+                "No resolution queued for this group.",
+                Style::default().fg(color_muted()),
+            )),
+        },
         Line::from(vec![
             Span::styled(
                 "Resolve group: ",

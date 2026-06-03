@@ -217,6 +217,7 @@ pub struct AppConflictDetail {
     pub icloud_href: Option<String>,
     pub diff_fields: String,
     pub created_at: String,
+    pub queued_resolution: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1715,6 +1716,7 @@ mod tests {
                     icloud_href: Some("/icloud-a.ics".to_string()),
                     diff_fields: "title|start|status".to_string(),
                     created_at: "2026-06-02 12:01:00".to_string(),
+                    queued_resolution: None,
                 },
                 AppConflictDetail {
                     id: "b".to_string(),
@@ -1733,6 +1735,7 @@ mod tests {
                     icloud_href: None,
                     diff_fields: "metadata".to_string(),
                     created_at: "2026-06-02 13:00:00".to_string(),
+                    queued_resolution: None,
                 },
             ],
             ..AppRuntimeSnapshot::default()
