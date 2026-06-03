@@ -375,7 +375,15 @@ impl CalendarProvider for GoogleCalendarProvider {
                     &[
                         ("maxResults", Some("2500".to_string())),
                         ("pageToken", page_token.clone()),
-                        ("showDeleted", Some("true".to_string())),
+                        // Deleted/cancelled events only matter for incremental
+                        // (sync-token) delta detection. On a full snapshot they
+                        // are tombstones that inflate the result and would be
+                        // mistaken for live events by the planner, so only ask
+                        // for them when resuming from a sync token.
+                        (
+                            "showDeleted",
+                            Some(if cursor.full_sync { "false" } else { "true" }.to_string()),
+                        ),
                         ("singleEvents", Some("false".to_string())),
                         (
                             "syncToken",

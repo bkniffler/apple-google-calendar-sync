@@ -21,9 +21,7 @@ use insync_db::{
             SyncRun, SyncRunStatus, complete_sync_run, fail_sync_run, latest_sync_run,
             start_sync_run,
         },
-        sync_state::{
-            clear_calendar_sync_token, load_calendar_sync_token, update_calendar_sync_token,
-        },
+        sync_state::{load_calendar_sync_token, update_calendar_sync_token},
     },
 };
 use insync_providers::{CalendarProvider, ProviderChangeSet, ProviderError, ProviderSyncCursor};
@@ -655,28 +653,26 @@ async fn get_changes_with_token_recovery(
     provider_calendar_id: &str,
     sync_token: Option<String>,
 ) -> Result<ProviderChangeSet, EngineError> {
-    let first_cursor = ProviderSyncCursor {
-        full_sync: sync_token.is_none(),
-        sync_token: sync_token.clone(),
+    // SAFETY: the two-way planner (`plan_two_way_actions`) decides an event was
+    // deleted on a provider purely from its ABSENCE in the event list it is
+    // given. That is only correct when the list is a full snapshot of the
+    // calendar. An incremental (sync-token) fetch returns only the events that
+    // changed since the token, so every unchanged event would look deleted and
+    // the planner would propagate spurious deletions to the other provider
+    // (observed: a single dry-run planned 1140 bogus iCloud deletions after a
+    // sync token was stored). Until the planner is made delta-aware we always
+    // perform a full fetch. Any sync token already stored in the database is
+    // intentionally ignored here, which also neutralizes previously persisted
+    // tokens without a migration.
+    let _ = (conn, db_calendar_id, sync_token);
+    let full_cursor = ProviderSyncCursor {
+        full_sync: true,
+        sync_token: None,
     };
-    let first =
-        with_provider_retry(|| provider.get_changes(provider_calendar_id, first_cursor.clone()))
-            .await;
-
-    match first {
-        Err(ProviderError::SyncTokenExpired(_)) if sync_token.is_some() => {
-            clear_calendar_sync_token(conn, db_calendar_id)?;
-            let full_cursor = ProviderSyncCursor {
-                full_sync: true,
-                sync_token: None,
-            };
-            Ok(with_provider_retry(|| {
-                provider.get_changes(provider_calendar_id, full_cursor.clone())
-            })
-            .await?)
-        }
-        result => Ok(result?),
-    }
+    Ok(
+        with_provider_retry(|| provider.get_changes(provider_calendar_id, full_cursor.clone()))
+            .await?,
+    )
 }
 
 async fn with_provider_retry<T, Fut, F>(mut operation: F) -> Result<T, ProviderError>
@@ -2684,7 +2680,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_planning_uses_stored_sync_tokens() {
+    async fn provider_planning_always_full_syncs_even_with_stored_token() {
+        // Regression guard: the two-way planner infers deletions from an event's
+        // absence in the fetched list, which is only valid for a full snapshot.
+        // Resuming from a sync token returns only a delta, so unchanged events
+        // would look deleted and the planner would propagate spurious deletions.
+        // The engine must therefore always request a full sync (full_sync=true,
+        // no token), even after a token has been stored by a previous apply.
         let temp_dir =
             std::env::temp_dir().join(format!("insync-engine-sync-token-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -2703,6 +2705,7 @@ mod tests {
             Some("icloud-token-1".to_string()),
         );
 
+        // First apply may persist a sync token returned by the providers.
         engine
             .plan_once_with_providers(
                 RunMode::Apply,
@@ -2715,6 +2718,8 @@ mod tests {
             .unwrap();
         google.clear_cursors();
         icloud.clear_cursors();
+        // The subsequent run must still fetch a full snapshot, ignoring the
+        // stored token.
         engine
             .plan_once_with_providers(
                 RunMode::DryRun,
@@ -2729,75 +2734,11 @@ mod tests {
         let google_cursors = google.cursors();
         let icloud_cursors = icloud.cursors();
         assert_eq!(google_cursors.len(), 1);
-        assert_eq!(
-            google_cursors[0].sync_token.as_deref(),
-            Some("google-token-1")
-        );
-        assert!(!google_cursors[0].full_sync);
+        assert!(google_cursors[0].full_sync);
+        assert_eq!(google_cursors[0].sync_token, None);
         assert_eq!(icloud_cursors.len(), 1);
-        assert_eq!(
-            icloud_cursors[0].sync_token.as_deref(),
-            Some("icloud-token-1")
-        );
-        assert!(!icloud_cursors[0].full_sync);
-
-        std::fs::remove_dir_all(&temp_dir).unwrap();
-    }
-
-    #[tokio::test]
-    async fn provider_planning_recovers_from_expired_sync_token() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "insync-engine-expired-token-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        let config_path = temp_dir.join("insync.json");
-        let config = config_with_db(".state/insync.db");
-        let engine = SyncEngine::with_config_path(config, &config_path);
-        let google = ExpiringCursorProvider::new(
-            ProviderName::Google,
-            vec![event("uid-1", "Token", ProviderName::Google)],
-            Some("google-token-2".to_string()),
-        );
-        let icloud = CursorRecordingProvider::new(
-            ProviderName::Icloud,
-            Vec::new(),
-            Some("icloud-token-1".to_string()),
-        );
-        let seed_google = CursorRecordingProvider::new(
-            ProviderName::Google,
-            vec![event("uid-1", "Token", ProviderName::Google)],
-            Some("google-token-1".to_string()),
-        );
-        engine
-            .plan_once_with_providers(
-                RunMode::Apply,
-                SyncProviders {
-                    google: &seed_google,
-                    icloud: &icloud,
-                },
-            )
-            .await
-            .unwrap();
-
-        engine
-            .plan_once_with_providers(
-                RunMode::DryRun,
-                SyncProviders {
-                    google: &google,
-                    icloud: &icloud,
-                },
-            )
-            .await
-            .unwrap();
-
-        let cursors = google.cursors();
-        assert_eq!(cursors.len(), 2);
-        assert_eq!(cursors[0].sync_token.as_deref(), Some("google-token-1"));
-        assert!(!cursors[0].full_sync);
-        assert_eq!(cursors[1].sync_token, None);
-        assert!(cursors[1].full_sync);
+        assert!(icloud_cursors[0].full_sync);
+        assert_eq!(icloud_cursors[0].sync_token, None);
 
         std::fs::remove_dir_all(&temp_dir).unwrap();
     }
@@ -2999,87 +2940,6 @@ mod tests {
             _etag: Option<&str>,
         ) -> Result<ProviderEventMeta, ProviderError> {
             Ok(meta(self.name, calendar_id, event))
-        }
-
-        async fn delete_event(
-            &self,
-            _calendar_id: &str,
-            _remote_event_id: &str,
-            _etag: Option<&str>,
-        ) -> Result<(), ProviderError> {
-            Ok(())
-        }
-    }
-
-    #[derive(Debug, Clone)]
-    struct ExpiringCursorProvider {
-        inner: CursorRecordingProvider,
-        expired_once: Arc<Mutex<bool>>,
-    }
-
-    impl ExpiringCursorProvider {
-        fn new(
-            name: ProviderName,
-            events: Vec<CanonicalEvent>,
-            sync_token: Option<String>,
-        ) -> Self {
-            Self {
-                inner: CursorRecordingProvider::new(name, events, sync_token),
-                expired_once: Arc::new(Mutex::new(false)),
-            }
-        }
-
-        fn cursors(&self) -> Vec<ProviderSyncCursor> {
-            self.inner.cursors()
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl CalendarProvider for ExpiringCursorProvider {
-        fn name(&self) -> ProviderName {
-            self.inner.name
-        }
-
-        async fn list_calendars(&self) -> Result<Vec<ProviderCalendar>, ProviderError> {
-            Ok(Vec::new())
-        }
-
-        async fn get_changes(
-            &self,
-            calendar_id: &str,
-            cursor: ProviderSyncCursor,
-        ) -> Result<ProviderChangeSet, ProviderError> {
-            self.inner.cursors.lock().unwrap().push(cursor.clone());
-            let mut expired_once = self.expired_once.lock().unwrap();
-            if !*expired_once && cursor.sync_token.is_some() {
-                *expired_once = true;
-                return Err(ProviderError::SyncTokenExpired(self.inner.name));
-            }
-
-            Ok(ProviderChangeSet {
-                provider: self.inner.name,
-                calendar_id: calendar_id.to_string(),
-                sync_token: self.inner.sync_token.clone(),
-                events: self.inner.events.clone(),
-            })
-        }
-
-        async fn create_event(
-            &self,
-            calendar_id: &str,
-            event: &CanonicalEvent,
-        ) -> Result<ProviderEventMeta, ProviderError> {
-            Ok(meta(self.inner.name, calendar_id, event))
-        }
-
-        async fn update_event(
-            &self,
-            calendar_id: &str,
-            _remote_event_id: &str,
-            event: &CanonicalEvent,
-            _etag: Option<&str>,
-        ) -> Result<ProviderEventMeta, ProviderError> {
-            Ok(meta(self.inner.name, calendar_id, event))
         }
 
         async fn delete_event(
