@@ -3906,8 +3906,8 @@ fn render_selected_pair(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
                 )),
                 Line::from(format!(
                     "Sync: G {} / I {}",
-                    pair.google_last_sync_at.as_deref().unwrap_or("never"),
-                    pair.icloud_last_sync_at.as_deref().unwrap_or("never")
+                    last_sync_label(pair.google_last_sync_at.as_deref()),
+                    last_sync_label(pair.icloud_last_sync_at.as_deref())
                 )),
             ]
         } else {
@@ -3940,7 +3940,7 @@ fn render_selected_pair(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
                 )),
                 Line::from(format!(
                     "Google sync: {}",
-                    pair.google_last_sync_at.as_deref().unwrap_or("never")
+                    last_sync_label(pair.google_last_sync_at.as_deref())
                 )),
                 Line::from(format!(
                     "iCloud: {}",
@@ -3959,7 +3959,7 @@ fn render_selected_pair(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
                 )),
                 Line::from(format!(
                     "iCloud sync: {}",
-                    pair.icloud_last_sync_at.as_deref().unwrap_or("never")
+                    last_sync_label(pair.icloud_last_sync_at.as_deref())
                 )),
             ]
         }
@@ -4233,20 +4233,25 @@ fn run_row(run: &AppRun, model: &AppModel, compact: bool) -> Row<'static> {
         Style::default().fg(run_status_color(&run.status))
     };
     let error = run.error.as_deref().unwrap_or("-");
+    let finished = run
+        .finished_at
+        .as_deref()
+        .map(relative_time)
+        .unwrap_or_else(|| "-".to_string());
     let cells = if compact {
         vec![
             marker.to_string(),
             run.status.clone(),
             run.pair_id.as_deref().unwrap_or("-").to_string(),
-            compact_string(&run.started_at, 18),
+            relative_time(&run.started_at),
         ]
     } else {
         vec![
             marker.to_string(),
             run.status.clone(),
             run.pair_id.as_deref().unwrap_or("-").to_string(),
-            compact_string(&run.started_at, 26),
-            compact_string(run.finished_at.as_deref().unwrap_or("-"), 26),
+            relative_time(&run.started_at),
+            finished,
             compact_string(error, 34),
         ]
     };
@@ -4271,8 +4276,11 @@ fn render_run_detail(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
                 Line::from(format!("Pair: {}", run.pair_id.as_deref().unwrap_or("-"))),
                 Line::from(format!(
                     "At: {} -> {}",
-                    compact_string(&run.started_at, 24),
-                    compact_string(run.finished_at.as_deref().unwrap_or("-"), 24)
+                    relative_time(&run.started_at),
+                    run.finished_at
+                        .as_deref()
+                        .map(relative_time)
+                        .unwrap_or_else(|| "-".to_string())
                 )),
                 Line::from(format!(
                     "Error: {}",
@@ -4292,11 +4300,15 @@ fn render_run_detail(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
                     compact_detail_value(&run.id, area.width)
                 )),
                 Line::from(format!("Pair: {}", run.pair_id.as_deref().unwrap_or("-"))),
-                Line::from(format!("Started: {}", run.started_at)),
                 Line::from(format!(
-                    "Finished: {}",
-                    run.finished_at.as_deref().unwrap_or("-")
+                    "Started: {} ({})",
+                    run.started_at,
+                    relative_time(&run.started_at)
                 )),
+                Line::from(match run.finished_at.as_deref() {
+                    Some(value) => format!("Finished: {} ({})", value, relative_time(value)),
+                    None => "Finished: -".to_string(),
+                }),
                 Line::from(format!(
                     "Error: {}",
                     compact_detail_value(run.error.as_deref().unwrap_or("-"), area.width)
@@ -4757,7 +4769,7 @@ fn conflict_summary_row(
             compact_string(&summary.pair_id, 18),
             summary.count.to_string(),
             compact_string(&summary.reason, 42),
-            compact_string(&summary.last_seen_at, 28),
+            relative_time(&summary.last_seen_at),
         ]
     };
 
@@ -4832,7 +4844,7 @@ fn conflict_detail_row(detail: &AppConflictDetail, compact: bool) -> Row<'static
         Row::new(vec![
             compact_string(detail.canonical_uid.as_deref().unwrap_or("-"), 24),
             compact_string(&detail.diff_fields, 36),
-            compact_string(&detail.created_at, 20),
+            relative_time(&detail.created_at),
         ])
     } else {
         Row::new(vec![
@@ -4840,7 +4852,7 @@ fn conflict_detail_row(detail: &AppConflictDetail, compact: bool) -> Row<'static
             compact_string(detail.canonical_uid.as_deref().unwrap_or("-"), 26),
             compact_string(detail.google_title.as_deref().unwrap_or("-"), 28),
             compact_string(detail.icloud_title.as_deref().unwrap_or("-"), 28),
-            compact_string(&detail.created_at, 22),
+            relative_time(&detail.created_at),
         ])
     }
     .style(Style::default().fg(Color::White))
@@ -4899,13 +4911,13 @@ fn render_conflict_workbench(frame: &mut Frame<'_>, area: Rect, model: &AppModel
         )),
         Line::from(format!(
             "Audit: unresolved since {}; group first {} last {}; link {}",
-            detail.created_at,
+            relative_time(&detail.created_at),
             summary
-                .map(|summary| summary.first_seen_at.as_str())
-                .unwrap_or("-"),
+                .map(|summary| relative_time(&summary.first_seen_at))
+                .unwrap_or_else(|| "-".to_string()),
             summary
-                .map(|summary| summary.last_seen_at.as_str())
-                .unwrap_or("-"),
+                .map(|summary| relative_time(&summary.last_seen_at))
+                .unwrap_or_else(|| "-".to_string()),
             detail.event_link_id.as_deref().unwrap_or("-")
         )),
         Line::from(format!(
@@ -5237,6 +5249,12 @@ fn relative_time(value: &str) -> String {
         return format!("{hours}h ago");
     }
     format!("{}d ago", delta.num_days())
+}
+
+fn last_sync_label(value: Option<&str>) -> String {
+    value
+        .map(relative_time)
+        .unwrap_or_else(|| "never".to_string())
 }
 
 fn direction_label(direction: insync_core::SyncDirection) -> &'static str {

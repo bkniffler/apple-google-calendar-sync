@@ -155,27 +155,41 @@ Use `--force` to replace an existing pair with the same ID. Directions are
 insync tui
 ```
 
-The TUI shows sync health, unresolved conflicts, recent run status, configured
-pairs, cached provider calendar names/accounts, raw calendar IDs, per-side last
-sync timestamps from SQLite, and a filterable recent-run history with selected
-run detail. It also has a setup wizard (`s`) with readiness checks and next
-actions, a conflict workbench (`c`) for unresolved conflict groups, stored
-Google/iCloud snapshot comparison, selected policy context, and unresolved audit
-timestamps; a dry-run report viewer (`v`) with action filters (`f`) and sort
-modes (`t`); plus a notification band for failed syncs, unresolved conflicts,
-and setup nudges. Calendar names are populated after setup discovery or
-`insync db calendars` has cached provider metadata. Color semantics are kept
-consistent: neutral idle states, blue/cyan active states, green clean states,
-yellow warnings/conflicts, and red failures or destructive actions.
-Press `:` inside the TUI to open the command palette for dry-run, apply,
-conflict refresh, setup, view switching, report export, and quit actions. The
-same shell actions are exposed as safe quick actions, including immediate
-dry-run/apply, conflict inspection, and background pause/resume (`b`). The key
-dashboard, run history, report, conflict, notification, and command-palette
-screens have buffer-level render tests to catch layout regressions. The TUI
-drives commands through `insync-app` events/effects, and `insync-app` exposes a
-shell snapshot with status, actions, and notifications for future tray or
-menu-bar shells.
+A single-row top bar carries the live sync status, active-pair count, and
+unresolved-conflict count; a single-row bottom bar carries context-sensitive key
+hints. Everything between is content, not chrome. Cycle screens with
+`tab`/`shift+tab`, or jump directly with the per-screen letter keys below:
+
+- **Pairs** — configured pairs with direction, enabled state, cached provider
+  calendar names/accounts, and raw calendar IDs, alongside selected-pair detail
+  with per-side last-sync times and a recent-activity feed of the latest runs.
+  All timestamps are shown relative ("just now", "4m ago", "2d ago").
+- **Plan** (`v`) — a dry-run viewer with a summary band (mode, total actions,
+  affected pairs, when generated, and per-action chips) over a filterable
+  (`f`)/sortable (`t`) action table; selecting a row shows a Google-vs-iCloud
+  field comparison with changed fields highlighted.
+- **Conflicts** (`c`) — unresolved conflict groups with stored snapshot
+  comparison, selected policy, and audit history. Resolve the selected group
+  in place: `g` Google wins, `i` iCloud wins, `x` delete wins, `u` update wins.
+- **Runs** (`l`) — filterable (`f`) run history with selected-run detail.
+- **Setup** (`s`) — a guided checklist with readiness checks and the next safe
+  command for each step.
+
+Press `d` to run a dry-run from anywhere. Apply (`a`) is gated: it opens a
+confirmation modal showing how many changes across how many pairs will be
+written, and only proceeds on `y`/`enter`. While a sync runs, the shell shows a
+visible syncing frame. Calendar names are populated after setup discovery or once
+`insync db calendars` has cached provider metadata.
+
+Color semantics are kept consistent: neutral idle states, blue/cyan active
+states, green clean states, yellow warnings/conflicts, and red failures or
+destructive actions. Press `:` to open the command palette for dry-run, apply,
+conflict refresh, setup, view switching, report export, and quit. The same shell
+actions are exposed as safe quick actions, including background pause/resume
+(`b`). Key screens have buffer-level render tests to catch layout regressions.
+The TUI drives commands through `insync-app` events/effects, and `insync-app`
+exposes a shell snapshot with status, actions, and notifications for future tray
+or menu-bar shells.
 
 ## Sync
 
