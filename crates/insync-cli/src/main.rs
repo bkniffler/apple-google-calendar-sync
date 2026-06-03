@@ -8,8 +8,9 @@ use crossterm::{
 };
 use insync_app::{
     AppCommand, AppConflictDetail, AppConflictSummary, AppEffect, AppEvent, AppModel,
-    AppNotificationSeverity, AppPairRuntimeSnapshot, AppPlanSummary, AppReportRow, AppRun,
-    AppRuntimeSnapshot, AppSetupStep, AppSetupStepStatus, AppShellAction, AppStatus, AppView,
+    AppNotificationSeverity, AppPairRuntimeSnapshot, AppPlanSummary, AppReportRow, AppResolution,
+    AppRun, AppRuntimeSnapshot, AppSetupStep, AppSetupStepStatus, AppShellAction, AppStatus,
+    AppView,
 };
 #[cfg(test)]
 use insync_app::{AppReportFilter, AppReportSort, AppRunFilter, AppSetupState};
@@ -1577,7 +1578,8 @@ mod tests {
         assert!(output.contains("Policy: manual review"));
         assert!(output.contains("Audit: unresolved since"));
         assert!(output.contains("uid-1"));
-        assert!(output.contains("g/i resolve"));
+        assert!(output.contains("g/i/x/u resolve"));
+        assert!(output.contains("Resolve group:"));
     }
 
     #[test]
@@ -3041,6 +3043,34 @@ async fn run_tui(mut model: AppModel, runtime: TuiRuntime) -> Result<()> {
                     KeyCode::Char('c') => {
                         model.update(AppEvent::ShowConflicts);
                     }
+                    KeyCode::Char('g') if model.view == AppView::Conflicts => {
+                        let effects = model
+                            .update(AppEvent::ResolveSelectedConflict(AppResolution::GoogleWins));
+                        if apply_tui_effects(&mut terminal, &mut model, &runtime, effects).await {
+                            break Ok(());
+                        }
+                    }
+                    KeyCode::Char('i') if model.view == AppView::Conflicts => {
+                        let effects = model
+                            .update(AppEvent::ResolveSelectedConflict(AppResolution::IcloudWins));
+                        if apply_tui_effects(&mut terminal, &mut model, &runtime, effects).await {
+                            break Ok(());
+                        }
+                    }
+                    KeyCode::Char('x') if model.view == AppView::Conflicts => {
+                        let effects = model
+                            .update(AppEvent::ResolveSelectedConflict(AppResolution::DeleteWins));
+                        if apply_tui_effects(&mut terminal, &mut model, &runtime, effects).await {
+                            break Ok(());
+                        }
+                    }
+                    KeyCode::Char('u') if model.view == AppView::Conflicts => {
+                        let effects = model
+                            .update(AppEvent::ResolveSelectedConflict(AppResolution::UpdateWins));
+                        if apply_tui_effects(&mut terminal, &mut model, &runtime, effects).await {
+                            break Ok(());
+                        }
+                    }
                     KeyCode::Char('f') if model.view == AppView::Runs => {
                         model.update(AppEvent::CycleRunFilter);
                     }
@@ -3117,6 +3147,10 @@ async fn apply_tui_effects<B: ratatui::backend::Backend>(
             AppEffect::LoadConflicts => {
                 refresh_tui_runtime_snapshot(model, runtime, None, None, "conflicts refreshed")
             }
+            AppEffect::ResolveConflict {
+                conflict_ids,
+                resolution,
+            } => resolve_tui_conflicts(model, runtime, &conflict_ids, resolution),
             AppEffect::ShowSetup => {
                 model.update(AppEvent::EngineFinished {
                     message: "setup requested".to_string(),
@@ -3173,6 +3207,36 @@ async fn maybe_autorun_plan<B: ratatui::backend::Backend>(
         return apply_tui_effects(terminal, model, runtime, effects).await;
     }
     false
+}
+
+fn manual_resolution(resolution: AppResolution) -> ManualResolution {
+    match resolution {
+        AppResolution::GoogleWins => ManualResolution::GoogleWins,
+        AppResolution::IcloudWins => ManualResolution::IcloudWins,
+        AppResolution::DeleteWins => ManualResolution::DeleteWins,
+        AppResolution::UpdateWins => ManualResolution::UpdateWins,
+    }
+}
+
+fn resolve_tui_conflicts(
+    model: &mut AppModel,
+    runtime: &TuiRuntime,
+    conflict_ids: &[String],
+    resolution: AppResolution,
+) -> Result<()> {
+    let manual = manual_resolution(resolution);
+    let mut resolved = 0usize;
+    for id in conflict_ids {
+        if runtime
+            .engine
+            .request_conflict_resolution(id, manual)?
+            .is_some()
+        {
+            resolved += 1;
+        }
+    }
+    let message = format!("queued {} for {resolved} conflict(s)", resolution.label());
+    refresh_tui_runtime_snapshot(model, runtime, None, None, &message)
 }
 
 async fn run_tui_sync(model: &mut AppModel, runtime: &TuiRuntime, mode: RunMode) -> Result<()> {
@@ -3596,7 +3660,7 @@ fn render_hint_bar(frame: &mut Frame<'_>, area: Rect, model: &AppModel) {
     spans.extend(hint("a", "apply", color_danger()));
     match model.view {
         AppView::Conflicts => {
-            spans.extend(hint("g/i", "resolve", color_warning()));
+            spans.extend(hint("g/i/x/u", "resolve", color_warning()));
             spans.extend(hint("r", "refresh", color_warning()));
         }
         AppView::Runs => {
@@ -4849,6 +4913,23 @@ fn render_conflict_workbench(frame: &mut Frame<'_>, area: Rect, model: &AppModel
             compact_string(detail.google_event_id.as_deref().unwrap_or("-"), 28),
             compact_string(detail.icloud_href.as_deref().unwrap_or("-"), 28)
         )),
+        Line::from(String::new()),
+        Line::from(vec![
+            Span::styled(
+                "Resolve group: ",
+                Style::default()
+                    .fg(color_warning())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("g", Style::default().fg(color_checking())),
+            Span::raw(" Google  "),
+            Span::styled("i", Style::default().fg(color_running())),
+            Span::raw(" iCloud  "),
+            Span::styled("x", Style::default().fg(color_danger())),
+            Span::raw(" delete  "),
+            Span::styled("u", Style::default().fg(color_success())),
+            Span::raw(" update"),
+        ]),
     ];
 
     frame.render_widget(

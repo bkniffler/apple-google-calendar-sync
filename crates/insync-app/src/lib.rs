@@ -274,6 +274,26 @@ pub enum AppCommand {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum AppResolution {
+    GoogleWins,
+    IcloudWins,
+    DeleteWins,
+    UpdateWins,
+}
+
+impl AppResolution {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::GoogleWins => "Google wins",
+            Self::IcloudWins => "iCloud wins",
+            Self::DeleteWins => "delete wins",
+            Self::UpdateWins => "update wins",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AppStatus {
     Idle,
     Checking,
@@ -308,6 +328,7 @@ pub enum AppEvent {
     SelectPreviousReportRow,
     SelectNextConflict,
     SelectPreviousConflict,
+    ResolveSelectedConflict(AppResolution),
     OpenCommandPalette,
     CloseCommandPalette,
     SelectNextCommand,
@@ -326,6 +347,10 @@ pub enum AppEffect {
     StartBackgroundScheduler,
     StopBackgroundScheduler,
     LoadConflicts,
+    ResolveConflict {
+        conflict_ids: Vec<String>,
+        resolution: AppResolution,
+    },
     ShowSetup,
     ExportDryRunReport,
     Quit,
@@ -637,6 +662,21 @@ impl AppModel {
             AppEvent::SelectPreviousConflict => {
                 self.select_previous_conflict();
                 Vec::new()
+            }
+            AppEvent::ResolveSelectedConflict(resolution) => {
+                let conflict_ids: Vec<String> = self
+                    .selected_conflict_details()
+                    .iter()
+                    .map(|detail| detail.id.clone())
+                    .collect();
+                if conflict_ids.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![AppEffect::ResolveConflict {
+                        conflict_ids,
+                        resolution,
+                    }]
+                }
             }
             AppEvent::OpenCommandPalette => {
                 self.command_palette_open = true;
@@ -1708,6 +1748,15 @@ mod tests {
 
         model.update(AppEvent::SelectNextConflict);
         assert_eq!(model.selected_conflict_summary().unwrap().pair_id, "work");
+
+        let effects = model.update(AppEvent::ResolveSelectedConflict(AppResolution::GoogleWins));
+        assert_eq!(
+            effects,
+            vec![AppEffect::ResolveConflict {
+                conflict_ids: vec!["b".to_string()],
+                resolution: AppResolution::GoogleWins,
+            }]
+        );
     }
 
     #[test]
