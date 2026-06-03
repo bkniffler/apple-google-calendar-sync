@@ -567,10 +567,12 @@ impl AppModel {
     pub fn update(&mut self, event: AppEvent) -> Vec<AppEffect> {
         match event {
             AppEvent::StartDryRun => {
+                self.view = AppView::Reports;
                 self.status = AppStatus::Syncing;
                 vec![AppEffect::RunDrySync]
             }
             AppEvent::StartApplyRun => {
+                self.view = AppView::Reports;
                 self.status = AppStatus::Syncing;
                 vec![AppEffect::RunApplySync]
             }
@@ -1305,6 +1307,7 @@ mod tests {
         let effects = model.update(AppEvent::StartDryRun);
 
         assert_eq!(model.status, AppStatus::Syncing);
+        assert_eq!(model.view, AppView::Reports);
         assert_eq!(effects, vec![AppEffect::RunDrySync]);
     }
 
